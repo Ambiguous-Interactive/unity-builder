@@ -170,13 +170,14 @@ echo "CACHE_KEY=$CACHE_KEY"`;
     if ! command -v yarn > /dev/null 2>&1; then printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/yarn && chmod +x /usr/local/bin/yarn; fi
     # Pipe entrypoint.sh output through log stream to capture Unity build output (including "Build succeeded")
     { echo "game ci start"; echo "game ci start" >> /home/job-log.txt; echo "CACHE_KEY=$CACHE_KEY"; echo "$CACHE_KEY"; if [ -n "$LOCKED_WORKSPACE" ]; then echo "Retained Workspace: true"; fi; if [ -n "$LOCKED_WORKSPACE" ] && [ -d "$GITHUB_WORKSPACE/.git" ]; then echo "Retained Workspace Already Exists!"; fi; /entrypoint.sh; } | node ${builderPath} -m remote-cli-log-stream --logFile /home/job-log.txt
+    # Ensure cache directories exist for post-build and S3 upload hooks.
+    # Do NOT create empty placeholder tars — they waste S3 storage and on next
+    # build the pull-cache hook downloads them, giving Unity an empty Library
+    # (no caching benefit). The real tars are created by remote-cli-post-build
+    # via Caching.PushToCache(), and the S3 upload hooks use || true so missing
+    # files are handled gracefully.
     mkdir -p "/data/cache/$CACHE_KEY/Library"
-    if [ ! -f "/data/cache/$CACHE_KEY/Library/lib-$BUILD_GUID.tar" ] && [ ! -f "/data/cache/$CACHE_KEY/Library/lib-$BUILD_GUID.tar.lz4" ]; then
-      tar -cf "/data/cache/$CACHE_KEY/Library/lib-$BUILD_GUID.tar" --files-from /dev/null || touch "/data/cache/$CACHE_KEY/Library/lib-$BUILD_GUID.tar"
-    fi
-    if [ ! -f "/data/cache/$CACHE_KEY/build/build-$BUILD_GUID.tar" ] && [ ! -f "/data/cache/$CACHE_KEY/build/build-$BUILD_GUID.tar.lz4" ]; then
-      tar -cf "/data/cache/$CACHE_KEY/build/build-$BUILD_GUID.tar" --files-from /dev/null || touch "/data/cache/$CACHE_KEY/build/build-$BUILD_GUID.tar"
-    fi
+    mkdir -p "/data/cache/$CACHE_KEY/build"
     # Run post-build tasks and capture output
     # Note: Post-build may clean up the builder directory, so we write output directly to log file
     # Use set +e to allow the command to fail without exiting the script
