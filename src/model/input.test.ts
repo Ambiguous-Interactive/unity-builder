@@ -334,4 +334,22 @@ describe('Input', () => {
       expect(spy).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('useHostNetwork', () => {
+    it('returns the default value', () => {
+      expect(Input.useHostNetwork).toStrictEqual(false);
+    });
+
+    it('returns true when string true is passed', () => {
+      const spy = jest.spyOn(core, 'getInput').mockReturnValue('true');
+      expect(Input.useHostNetwork).toStrictEqual(true);
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns false when string false is passed', () => {
+      const spy = jest.spyOn(core, 'getInput').mockReturnValue('false');
+      expect(Input.useHostNetwork).toStrictEqual(false);
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+  });
 });
