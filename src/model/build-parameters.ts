@@ -47,6 +47,7 @@ class BuildParameters {
   public containerRegistryImageVersion!: string;
 
   public customParameters!: string;
+  public useHostNetwork!: boolean;
   public sshAgent!: string;
   public sshPublicKeysDirectoryPath!: string;
   public providerStrategy!: string;
@@ -141,6 +142,7 @@ class BuildParameters {
       androidExportType: Input.androidExportType,
       androidSymbolType: androidSymbolExportType,
       customParameters: Input.customParameters,
+      useHostNetwork: Input.useHostNetwork,
       sshAgent: Input.sshAgent,
       sshPublicKeysDirectoryPath: Input.sshPublicKeysDirectoryPath,
       gitPrivateToken: Input.gitPrivateToken ?? (await GithubCliReader.GetGitHubAuthToken()),
