@@ -139,6 +139,12 @@ class Input {
     return Input.getInput('customParameters') ?? '';
   }
 
+  static get useHostNetwork(): boolean {
+    const input = Input.getInput('useHostNetwork') ?? false;
+
+    return input === 'true';
+  }
+
   static get versioningStrategy(): string {
     return Input.getInput('versioning') ?? 'Semantic';
   }
