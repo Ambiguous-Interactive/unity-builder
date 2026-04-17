@@ -47,6 +47,10 @@ inputs:
     required: false
     default: ''
     description: 'Custom parameters to configure the build.'
+  useHostNetwork:
+    required: false
+    default: false
+    description: 'Initialises Docker using the host network. (Linux only)'
   versioning:
     required: false
     default: 'Semantic'
