@@ -219,5 +219,10 @@ describe('BuildParameters', () => {
       jest.spyOn(Input, 'customParameters', 'get').mockReturnValue(mockValue);
       await expect(BuildParameters.create()).resolves.toEqual(expect.objectContaining({ customParameters: mockValue }));
     });
+
+    it.each([true, false])('returns the flag for useHostNetwork when %s', async (mockValue) => {
+      jest.spyOn(Input, 'useHostNetwork', 'get').mockReturnValue(mockValue);
+      await expect(BuildParameters.create()).resolves.toEqual(expect.objectContaining({ useHostNetwork: mockValue }));
+    });
   });
 });
