@@ -21,9 +21,9 @@ permissions:
   checks: write
   statuses: write
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+# Note: no concurrency block here — when invoked via workflow_call, the caller
+# (integrity-check.yml) manages concurrency. For direct dispatch/cron, runs are
+# naturally serialized by GitHub's single-concurrency-per-ref default.
 
 env:
   AWS_STACK_NAME: game-ci-team-pipelines
