@@ -18,10 +18,10 @@
     "node": ">=18.x"
   },
   "dependencies": {
-    "@actions/cache": "^4.0.0",
+    "@actions/cache": "^5.0.0",
     "@actions/core": "^1.11.1",
     "@actions/exec": "^1.1.1",
-    "@actions/github": "^6.0.0",
+    "@actions/github": "^8.0.1",
     "commander": "^9.0.0",
     "commander-ts": "^0.2.0",
     "md5": "^2.3.0",
