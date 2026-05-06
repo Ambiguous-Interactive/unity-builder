@@ -47,6 +47,7 @@ class BuildParameters {
   public containerRegistryImageVersion!: string;
 
   public customParameters!: string;
+  public useHostNetwork!: boolean;
   public sshAgent!: string;
   public sshPublicKeysDirectoryPath!: string;
   public providerStrategy!: string;
@@ -68,11 +69,26 @@ class BuildParameters {
   public dockerWorkspacePath!: string;
 
   static async create(): Promise<BuildParameters> {
-    const buildFile = this.parseBuildFile(Input.buildName, Input.targetPlatform, Input.androidExportType);
-    const editorVersion = UnityVersioning.determineUnityVersion(Input.projectPath, Input.unityVersion);
-    const buildVersion = await Versioning.determineBuildVersion(Input.versioningStrategy, Input.specifiedVersion);
-    const androidVersionCode = AndroidVersioning.determineVersionCode(buildVersion, Input.androidVersionCode);
-    const androidSdkManagerParameters = AndroidVersioning.determineSdkManagerParameters(Input.androidTargetSdkVersion);
+    const buildFile = this.parseBuildFile(
+      Input.buildName,
+      Input.targetPlatform,
+      Input.androidExportType,
+    );
+    const editorVersion = UnityVersioning.determineUnityVersion(
+      Input.projectPath,
+      Input.unityVersion,
+    );
+    const buildVersion = await Versioning.determineBuildVersion(
+      Input.versioningStrategy,
+      Input.specifiedVersion,
+    );
+    const androidVersionCode = AndroidVersioning.determineVersionCode(
+      buildVersion,
+      Input.androidVersionCode,
+    );
+    const androidSdkManagerParameters = AndroidVersioning.determineSdkManagerParameters(
+      Input.androidTargetSdkVersion,
+    );
 
     const androidSymbolExportType = Input.androidSymbolType;
     if (Platform.isAndroid(Input.targetPlatform)) {
@@ -111,7 +127,8 @@ class BuildParameters {
       core.setSecret(`${unitySerial.slice(0, -4)}XXXX`);
     }
 
-    const providerStrategy = Input.getInput('providerStrategy') || (Cli.isCliMode ? 'aws' : 'local');
+    const providerStrategy =
+      Input.getInput('providerStrategy') || (Cli.isCliMode ? 'aws' : 'local');
 
     return {
       editorVersion,
@@ -141,6 +158,7 @@ class BuildParameters {
       androidExportType: Input.androidExportType,
       androidSymbolType: androidSymbolExportType,
       customParameters: Input.customParameters,
+      useHostNetwork: Input.useHostNetwork,
       sshAgent: Input.sshAgent,
       sshPublicKeysDirectoryPath: Input.sshPublicKeysDirectoryPath,
       gitPrivateToken: Input.gitPrivateToken ?? (await GithubCliReader.GetGitHubAuthToken()),
@@ -155,7 +173,8 @@ class BuildParameters {
       buildPlatform: providerStrategy !== 'local' ? 'linux' : process.platform,
       runNumber: Input.runNumber,
       branch: Input.branch.replace('/head', '') || (await GitRepoReader.GetBranch()),
-      githubRepo: (Input.githubRepo ?? (await GitRepoReader.GetRemote())) || 'game-ci/unity-builder',
+      githubRepo:
+        (Input.githubRepo ?? (await GitRepoReader.GetRemote())) || 'game-ci/unity-builder',
       gitSha: Input.gitSha,
       logId: customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 9)(),
       buildGuid: `${Input.runNumber}-${Input.targetPlatform.toLowerCase().replace('standalone', '')}-${customAlphabet(

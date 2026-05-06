@@ -63,14 +63,28 @@ jobs:
           repository: game-ci/orchestrator
           path: orchestrator-standalone
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Install package manager (from package.json)
+        run: |
+          corepack enable
+          corepack install
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: yarn
+      - name: Resolve yarn cache folder
+        id: yarn-config
+        run: echo "cacheFolder=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
+      - name: Restore yarn install cache (node_modules + cacheFolder + install-state)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.yarn-config.outputs.cacheFolder }}
+            .yarn/install-state.gz
+          key: yarn-v2-${{ runner.os }}-node-20-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-v2-${{ runner.os }}-node-20-
 
       - name: Install unity-builder dependencies
-        run: yarn install --frozen-lockfile
+        run: yarn install --immutable
 
       - name: Build unity-builder
         run: |
@@ -86,7 +100,7 @@ jobs:
       - name: Build and pack orchestrator
         working-directory: orchestrator-standalone
         run: |
-          yarn install --frozen-lockfile
+          yarn install --immutable
           echo "Building orchestrator..."
           npx tsc
           echo "✓ orchestrator compiles successfully"
@@ -160,11 +174,25 @@ jobs:
           repository: game-ci/orchestrator
           lfs: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Install package manager (from package.json)
+        run: |
+          corepack enable
+          corepack install
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: yarn
+      - name: Resolve yarn cache folder
+        id: yarn-config
+        run: echo "cacheFolder=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
+      - name: Restore yarn install cache (node_modules + cacheFolder + install-state)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.yarn-config.outputs.cacheFolder }}
+            .yarn/install-state.gz
+          key: yarn-v2-${{ runner.os }}-node-20-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-v2-${{ runner.os }}-node-20-
 
       - name: Set up kubectl
         uses: azure/setup-kubectl@v4
@@ -267,20 +295,20 @@ jobs:
 
       - name: Create S3 bucket for tests
         run: |
-          for i in {1..10}; do
+          for _ in {1..10}; do
             if curl -s http://localhost:4566/_localstack/health > /dev/null 2>&1; then break; fi
             sleep 1
           done
-          for i in {1..5}; do
+          for _ in {1..5}; do
             if command -v awslocal > /dev/null 2>&1; then
-              awslocal s3 mb s3://$AWS_STACK_NAME 2>&1 && break
+              awslocal s3 mb s3://"$AWS_STACK_NAME" 2>&1 && break
             else
-              aws --endpoint-url=http://localhost:4566 s3 mb s3://$AWS_STACK_NAME 2>&1 && break
+              aws --endpoint-url=http://localhost:4566 s3 mb s3://"$AWS_STACK_NAME" 2>&1 && break
             fi
             sleep 2
           done
 
-      - run: yarn install --frozen-lockfile
+      - run: yarn install --immutable
 
       - name: Build orchestrator
         run: |
@@ -314,7 +342,7 @@ jobs:
             --network orchestrator-net \
             --wait
           kubectl config current-context | cat
-          echo "LOCALSTACK_IP=$LOCALSTACK_IP" >> $GITHUB_ENV
+          echo "LOCALSTACK_IP=$LOCALSTACK_IP" >> "$GITHUB_ENV"
 
       - name: Verify cluster readiness and MiniStack connectivity
         timeout-minutes: 2
@@ -327,15 +355,15 @@ jobs:
           kubectl get nodes
           LOCALSTACK_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' localstack-main 2>/dev/null || echo "")
           kubectl run test-localstack --image=curlimages/curl --rm -i --restart=Never --timeout=30s -- \
-            curl -v --max-time 10 http://${LOCALSTACK_IP}:4566/_localstack/health 2>&1 | head -30 || \
+            curl -v --max-time 10 http://"${LOCALSTACK_IP}":4566/_localstack/health 2>&1 | head -30 || \
             echo "Cluster connectivity test - MiniStack may not be accessible from k3d"
 
       - name: Clean up K8s resources before tests
         run: |
           source /tmp/cleanup-functions.sh
           k8s_resource_cleanup
-          for i in {1..30}; do
-            PVC_COUNT=$(kubectl get pvc -n default 2>/dev/null | grep "unity-builder-pvc-" | wc -l || echo "0")
+          for _ in {1..30}; do
+            PVC_COUNT=$(kubectl get pvc -n default 2>/dev/null | grep -c "unity-builder-pvc-" || echo "0")
             if [ "$PVC_COUNT" -eq 0 ]; then echo "All PVCs deleted"; break; fi
             sleep 1
           done
@@ -539,11 +567,25 @@ jobs:
           repository: game-ci/orchestrator
           lfs: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Install package manager (from package.json)
+        run: |
+          corepack enable
+          corepack install
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: yarn
+      - name: Resolve yarn cache folder
+        id: yarn-config
+        run: echo "cacheFolder=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
+      - name: Restore yarn install cache (node_modules + cacheFolder + install-state)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.yarn-config.outputs.cacheFolder }}
+            .yarn/install-state.gz
+          key: yarn-v2-${{ runner.os }}-node-20-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-v2-${{ runner.os }}-node-20-
 
       - name: Define cleanup functions
         run: |
@@ -588,16 +630,16 @@ jobs:
 
       - name: Create S3 bucket for tests
         run: |
-          for i in {1..5}; do
+          for _ in {1..5}; do
             if command -v awslocal > /dev/null 2>&1; then
-              awslocal s3 mb s3://$AWS_STACK_NAME 2>&1 && break
+              awslocal s3 mb s3://"$AWS_STACK_NAME" 2>&1 && break
             else
-              aws --endpoint-url=http://localhost:4566 s3 mb s3://$AWS_STACK_NAME 2>&1 && break
+              aws --endpoint-url=http://localhost:4566 s3 mb s3://"$AWS_STACK_NAME" 2>&1 && break
             fi
             sleep 2
           done
 
-      - run: yarn install --frozen-lockfile
+      - run: yarn install --immutable
 
       - name: Build orchestrator
         run: |
@@ -830,11 +872,25 @@ jobs:
           repository: game-ci/orchestrator
           lfs: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Install package manager (from package.json)
+        run: |
+          corepack enable
+          corepack install
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: yarn
+      - name: Resolve yarn cache folder
+        id: yarn-config
+        run: echo "cacheFolder=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
+      - name: Restore yarn install cache (node_modules + cacheFolder + install-state)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.yarn-config.outputs.cacheFolder }}
+            .yarn/install-state.gz
+          key: yarn-v2-${{ runner.os }}-node-20-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-v2-${{ runner.os }}-node-20-
 
       - name: Define cleanup functions
         run: |
@@ -879,16 +935,16 @@ jobs:
 
       - name: Create S3 bucket for tests
         run: |
-          for i in {1..5}; do
+          for _ in {1..5}; do
             if command -v awslocal > /dev/null 2>&1; then
-              awslocal s3 mb s3://$AWS_STACK_NAME 2>&1 && break
+              awslocal s3 mb s3://"$AWS_STACK_NAME" 2>&1 && break
             else
-              aws --endpoint-url=http://localhost:4566 s3 mb s3://$AWS_STACK_NAME 2>&1 && break
+              aws --endpoint-url=http://localhost:4566 s3 mb s3://"$AWS_STACK_NAME" 2>&1 && break
             fi
             sleep 2
           done
 
-      - run: yarn install --frozen-lockfile
+      - run: yarn install --immutable
 
       - name: Build orchestrator
         run: |
@@ -1095,11 +1151,25 @@ jobs:
           repository: game-ci/orchestrator
           lfs: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Install package manager (from package.json)
+        run: |
+          corepack enable
+          corepack install
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: yarn
+      - name: Resolve yarn cache folder
+        id: yarn-config
+        run: echo "cacheFolder=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
+      - name: Restore yarn install cache (node_modules + cacheFolder + install-state)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.yarn-config.outputs.cacheFolder }}
+            .yarn/install-state.gz
+          key: yarn-v2-${{ runner.os }}-node-20-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-v2-${{ runner.os }}-node-20-
 
       - name: Initial disk space cleanup
         run: |
@@ -1131,16 +1201,16 @@ jobs:
 
       - name: Create S3 bucket for tests
         run: |
-          for i in {1..5}; do
+          for _ in {1..5}; do
             if command -v awslocal > /dev/null 2>&1; then
-              awslocal s3 mb s3://$AWS_STACK_NAME 2>&1 && break
+              awslocal s3 mb s3://"$AWS_STACK_NAME" 2>&1 && break
             else
-              aws --endpoint-url=http://localhost:4566 s3 mb s3://$AWS_STACK_NAME 2>&1 && break
+              aws --endpoint-url=http://localhost:4566 s3 mb s3://"$AWS_STACK_NAME" 2>&1 && break
             fi
             sleep 2
           done
 
-      - run: yarn install --frozen-lockfile
+      - run: yarn install --immutable
 
       - name: Build orchestrator
         run: |
