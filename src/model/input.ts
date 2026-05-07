@@ -122,6 +122,10 @@ class Input {
     return Input.getInput('unityLicensingServer') ?? '';
   }
 
+  static get unityLicensingToolset(): string {
+    return Input.getInput('unityLicensingToolset') ?? '';
+  }
+
   static get buildMethod(): string {
     return Input.getInput('buildMethod') ?? ''; // Processed in docker file
   }

@@ -32,6 +32,13 @@ class PlatformSetup {
 
     let servicesConfig = fs.readFileSync(servicesConfigPathTemplate).toString();
     servicesConfig = servicesConfig.replace('%URL%', buildParameters.unityLicensingServer);
+
+    if (buildParameters.unityLicensingToolset) {
+      const parsed = JSON.parse(servicesConfig);
+      parsed.toolset = buildParameters.unityLicensingToolset;
+      servicesConfig = JSON.stringify(parsed, undefined, 2);
+    }
+
     fs.writeFileSync(servicesConfigPath, servicesConfig);
 
     SetupAndroid.setup(buildParameters);

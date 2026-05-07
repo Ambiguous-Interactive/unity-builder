@@ -168,6 +168,14 @@ inputs:
     default: ''
     required: false
     description: 'The Unity licensing server address to use for activating Unity.'
+  unityLicensingToolset:
+    default: ''
+    required: false
+    description:
+      'Optional toolset identifier for Unity floating-license servers that host multiple toolsets (e.g.
+      "LicenseServer_1234567890_3"). When set, written to services-config.json so the Licensing Client
+      requests entitlements from the named toolset instead of relying on the server-side default. Leave
+      empty to preserve previous behavior.'
   dockerWorkspacePath:
     default: '/github/workspace'
     required: false
@@ -181,8 +189,7 @@ inputs:
   linux64RemoveExecutableExtension:
     default: 'false'
     required: false
-    description:
-      'When building for StandaloneLinux64, remove the default file extension of `.x86_64`. Set to true to restore the extensionless behavior from v4.'
+    description: 'When building for StandaloneLinux64, remove the default file extension of `.x86_64`. Set to true to restore the extensionless behavior from v4.'
 
 outputs:
   volume:
