@@ -63,4 +63,31 @@ if ($buildIndex -lt 0 -or $cleanupIndex -le $buildIndex -or $exitIndex -le $clea
     throw 'Entrypoint must preserve build -> cleanup -> BUILD_EXIT_CODE ordering.'
 }
 
+$classifier = Join-Path $PSScriptRoot 'classify-build-resource-proof.ps1'
+$classificationCases = @(
+    @{ Name = 'no attempt'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Expected = 'false' },
+    @{ Name = 'confirmed success'; Outcomes = @('success', 'skipped', 'skipped'); Proofs = @('true', '', ''); Expected = 'true' },
+    @{ Name = 'confirmed failed builds'; Outcomes = @('failure', 'failure', 'skipped'); Proofs = @('true', 'true', ''); Expected = 'true' },
+    @{ Name = 'failed return'; Outcomes = @('failure', 'skipped', 'skipped'); Proofs = @('false', '', ''); Expected = 'false' },
+    @{ Name = 'cancel after safe attempt'; Outcomes = @('failure', 'cancelled', 'skipped'); Proofs = @('true', '', ''); Expected = 'false' }
+)
+foreach ($case in $classificationCases) {
+    $outputPath = Join-Path ([System.IO.Path]::GetTempPath()) ("resource-proof-{0}.txt" -f [guid]::NewGuid())
+    try {
+        $env:GITHUB_OUTPUT = $outputPath
+        foreach ($attempt in 1..3) {
+            [Environment]::SetEnvironmentVariable("BUILD_${attempt}_OUTCOME", $case.Outcomes[$attempt - 1])
+            [Environment]::SetEnvironmentVariable("BUILD_${attempt}_RESOURCE_SAFE", $case.Proofs[$attempt - 1])
+        }
+        & $classifier
+        $actual = (Get-Content -LiteralPath $outputPath | Select-Object -Last 1) -replace '^resource-safe=', ''
+        if ($actual -ne $case.Expected) {
+            throw "Classifier case '$($case.Name)' expected $($case.Expected), got $actual."
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Host 'Windows resource cleanup proof AST contract passed.'

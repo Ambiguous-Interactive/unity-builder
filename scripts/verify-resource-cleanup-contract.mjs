@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { parse } from 'yaml';
 
 const root = path.resolve(process.argv[2] || '.');
 const failures = [];
@@ -81,8 +82,105 @@ requireOrder('RC011', 'dist/platforms/windows/entrypoint.ps1', [
 requireText('RC012', 'dist/index.js', 'UNITY_BUILDER_RESOURCE_PROOF_NONCE');
 requireText('RC013', 'dist/index.js', 'resourceSafe');
 
+const windowsWorkflow = parse(read('.github/workflows/build-tests-windows.yml'));
+const windowsJob = windowsWorkflow.jobs?.buildForAllPlatformsWindows;
+const windowsSteps = windowsJob?.steps || [];
+const windowsStepIndex = (id) => windowsSteps.findIndex((step) => step.id === id);
+const windowsStep = (id) => windowsSteps.find((step) => step.id === id);
+if (
+  !Object.hasOwn(windowsWorkflow.on || {}, 'push') ||
+  !Object.hasOwn(windowsWorkflow.on || {}, 'workflow_dispatch')
+)
+  failures.push('RC014: Windows workflow must retain push static checks and manual canaries');
+if (windowsJob?.if !== "github.event_name == 'workflow_dispatch'")
+  failures.push('RC014: licensed Windows matrix must be manual-only');
+if (windowsJob?.strategy?.['max-parallel'] !== 1)
+  failures.push('RC014: licensed Windows matrix must admit only one runner at a time');
+const expectedBuildConditions = [
+  "${{ steps.acquire-build-lock.outputs.acquired == 'true' }}",
+  "${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' }}",
+  "${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-2.outcome == 'failure' }}",
+];
+if (
+  [1, 2, 3].some(
+    (attempt) => windowsStep(`build-${attempt}`)?.if !== expectedBuildConditions[attempt - 1],
+  )
+)
+  failures.push('RC014: every licensed Windows attempt must require organization lock ownership');
+const lifecycleIndices = [
+  windowsStepIndex('acquire-build-lock'),
+  windowsStepIndex('build-1'),
+  windowsStepIndex('build-2'),
+  windowsStepIndex('build-3'),
+  windowsStepIndex('cleanup-proof'),
+  windowsSteps.findIndex((step) => step.name === 'Release organization Unity lock'),
+  windowsSteps.findIndex((step) => step.name === 'Verify activation-owning cleanup proof'),
+];
+if (
+  lifecycleIndices.some((index) => index < 0) ||
+  lifecycleIndices.some((index, offset) => offset > 0 && index <= lifecycleIndices[offset - 1])
+)
+  failures.push('RC014: Windows canary must order acquire, build, proof, and release');
+if (
+  windowsStep('acquire-build-lock')?.uses !==
+    'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@7f892c7c585a962940f83c2f058e3cdcd3c673c5' ||
+  windowsStep('acquire-build-lock')?.with?.['require-resource-lifecycle'] !== 'true' ||
+  windowsStep('acquire-build-lock')?.with?.['minimum-release-cooldown-seconds'] !== '360'
+)
+  failures.push('RC014: Windows canary must atomically require the lifecycle-aware lock contract');
+const windowsRelease = windowsSteps.find((step) => step.name === 'Release organization Unity lock');
+const cleanupProof = windowsStep('cleanup-proof');
+const expectedReleaseCondition =
+  "${{ always() && (steps.acquire-build-lock.outcome == 'success' || steps.acquire-build-lock.outcome == 'failure' || steps.acquire-build-lock.outcome == 'cancelled') }}";
+if (
+  cleanupProof?.if !== "${{ always() && steps.acquire-build-lock.outcome == 'success' }}" ||
+  cleanupProof?.run !== './scripts/classify-build-resource-proof.ps1' ||
+  [1, 2, 3].some(
+    (attempt) =>
+      cleanupProof?.env?.[`BUILD_${attempt}_OUTCOME`] !== `\${{ steps.build-${attempt}.outcome }}` ||
+      cleanupProof?.env?.[`BUILD_${attempt}_RESOURCE_SAFE`] !==
+        `\${{ steps.build-${attempt}.outputs.resourceSafe }}`,
+  )
+)
+  failures.push('RC014: cleanup classifier must inspect every attempted build under always()');
+const expectedRunnerId =
+  '${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}';
+const expectedHolderSuffix = '${{ github.job }}-${{ strategy.job-index }}';
+if (
+  [windowsStep('acquire-build-lock'), windowsRelease].some(
+    (step) =>
+      step?.with?.['runner-id'] !== expectedRunnerId ||
+      step?.with?.['holder-id-suffix'] !== expectedHolderSuffix,
+  )
+)
+  failures.push('RC014: Windows acquire and release must use the same unique ephemeral identity');
+if (
+  windowsRelease?.uses !==
+    'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@7f892c7c585a962940f83c2f058e3cdcd3c673c5' ||
+  windowsRelease?.if !== expectedReleaseCondition ||
+  windowsRelease?.with?.['resource-safe'] !==
+    "${{ steps.cleanup-proof.outputs.resource-safe || 'false' }}"
+)
+  failures.push('RC014: Windows release must fail closed from the owning-container proof');
+
+for (const [platform, file, jobName] of [
+  ['macOS', '.github/workflows/build-tests-mac.yml', 'buildForAllPlatformsMacOS'],
+  ['Ubuntu', '.github/workflows/build-tests-ubuntu.yml', 'buildForAllPlatformsUbuntu'],
+]) {
+  const workflow = parse(read(file));
+  if (Object.keys(workflow.on || {}).join(',') !== 'workflow_dispatch')
+    failures.push(`RC014: ${platform} build workflow must not run automatically in the fork`);
+  if (
+    platform === 'macOS' &&
+    workflow.jobs?.[jobName]?.if !== "${{ github.repository == 'game-ci/unity-builder' }}"
+  )
+    failures.push('RC014: paid-license macOS builds must stay disabled in the fork');
+  if (platform === 'Ubuntu' && JSON.stringify(workflow).includes('UNITY_SERIAL'))
+    failures.push('RC014: Ubuntu Personal-license workflow must not join the paid serial pool');
+}
+
 if (failures.length) {
   console.error(failures.join('\n'));
   process.exit(1);
 }
-console.log('Resource cleanup contract verified (RC001-RC013).');
+console.log('Resource cleanup contract verified (RC001-RC014).');
