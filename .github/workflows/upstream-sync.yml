@@ -105,7 +105,8 @@ jobs:
             exit 0
           fi
 
-          mapfile -t changed < <(git diff --name-only "$tracked" "$upstream_sha")
+          git diff --name-only --no-renames "$tracked" "$upstream_sha" >/tmp/upstream-changed-files
+          mapfile -t changed </tmp/upstream-changed-files
           risky=()
           safe=()
           for file in "${changed[@]}"; do
@@ -287,7 +288,10 @@ jobs:
             echo "Candidate metadata changed: head=${actual_head}, branch=${actual_branch}, base=${actual_base}, cross-repository=${cross_repository}, upstream=${current_upstream}" >&2
             false
           fi
-          mapfile -t changed < <(git diff --name-only "$(tr -d '[:space:]' < UPSTREAM_COMMIT)" "$TARGET_UPSTREAM_SHA")
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          git diff --name-only --no-renames "$(tr -d '[:space:]' < UPSTREAM_COMMIT)" "$TARGET_UPSTREAM_SHA" >/tmp/upstream-changed-files
+          mapfile -t changed </tmp/upstream-changed-files
           for file in "${changed[@]}"; do
             case "$file" in
               *.md|LICENSE|LICENSE.md|LICENSE.txt|CODE_OF_CONDUCT.md|media/*.png|media/*.jpg|media/*.jpeg|media/*.gif|media/*.svg) ;;
