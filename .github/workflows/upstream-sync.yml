@@ -43,7 +43,8 @@ jobs:
           upstream_sha=unknown
           canonical_issue() {
             local numbers duplicate
-            mapfile -t numbers < <(gh issue list --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number')
+            gh issue list --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number' >/tmp/upstream-issue-numbers
+            mapfile -t numbers </tmp/upstream-issue-numbers
             for duplicate in "${numbers[@]:1}"; do
               gh issue close "$duplicate" --comment "Closing duplicate; continuing in #${numbers[0]}." >/dev/null
             done
@@ -243,7 +244,8 @@ jobs:
           set -Eeuo pipefail
           canonical_issue() {
             local numbers duplicate
-            mapfile -t numbers < <(gh issue list --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number')
+            gh issue list --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number' >/tmp/upstream-issue-numbers
+            mapfile -t numbers </tmp/upstream-issue-numbers
             for duplicate in "${numbers[@]:1}"; do
               gh issue close "$duplicate" --comment "Closing duplicate; continuing in #${numbers[0]}." >/dev/null
             done
@@ -305,7 +307,7 @@ jobs:
             -f head="$CANDIDATE_SHA" \
             --jq '.data.mergePullRequest.pullRequest | select(.state == "MERGED" and .headRefOid == env.CANDIDATE_SHA) | .state' \
             | grep -qx MERGED
-          git push origin --delete "$SYNC_BRANCH" || true
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${SYNC_BRANCH}" --silent
 
   report-workflow-failure:
     needs: [discover, validate, finalize]
@@ -326,7 +328,8 @@ jobs:
           FINALIZE_RESULT: ${{ needs.finalize.result }}
         run: |
           set -euo pipefail
-          mapfile -t numbers < <(gh issue list --repo "$GITHUB_REPOSITORY" --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number')
+          gh issue list --repo "$GITHUB_REPOSITORY" --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number' >/tmp/upstream-issue-numbers
+          mapfile -t numbers </tmp/upstream-issue-numbers
           canonical="${numbers[0]:-}"
           for duplicate in "${numbers[@]:1}"; do
             gh issue close "$duplicate" --repo "$GITHUB_REPOSITORY" --comment "Closing duplicate; continuing in #${canonical}." >/dev/null

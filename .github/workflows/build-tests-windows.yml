@@ -178,7 +178,7 @@ jobs:
       # We use dirty build because we are replacing the default project settings file above
 
       - name: Verify activation-owning cleanup proof
-        if: ${{ always() }}
+        if: ${{ always() && !cancelled() }}
         shell: pwsh
         env:
           BUILD_1_OUTCOME: ${{ steps.build-1.outcome }}
