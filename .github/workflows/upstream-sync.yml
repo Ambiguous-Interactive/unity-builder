@@ -312,7 +312,9 @@ jobs:
           delete_status=$?
           set -e
           if (( delete_status != 0 )); then
-            if grep -Eq '^HTTP/[^ ]+ (404|422)' <<<"$delete_response" && grep -Eqi 'reference.*(does not exist|not found)|not found' <<<"$delete_response"; then
+            http_status="$(sed -n '1s/^HTTP\/[^ ]* \([0-9][0-9][0-9]\).*/\1/p' <<<"$delete_response")"
+            response_body="$(sed '1,/^[[:space:]]*$/d' <<<"$delete_response")"
+            if [[ "$http_status" =~ ^(404|422)$ ]] && grep -Eqi '"message"[[:space:]]*:[[:space:]]*"Reference does not exist"' <<<"$response_body"; then
               echo 'Sync branch was already absent after the successful merge.'
             else
               echo "$delete_response" >&2
