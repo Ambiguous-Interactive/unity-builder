@@ -307,20 +307,27 @@ jobs:
             -f head="$CANDIDATE_SHA" \
             --jq '.data.mergePullRequest.pullRequest | select(.state == "MERGED" and .headRefOid == env.CANDIDATE_SHA) | .state' \
             | grep -qx MERGED
+          delete_stdout="$(mktemp)"
+          delete_stderr="$(mktemp)"
           set +e
-          delete_response="$(gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${SYNC_BRANCH}" --include 2>&1)"
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${SYNC_BRANCH}" --include >"$delete_stdout" 2>"$delete_stderr"
           delete_status=$?
           set -e
           if (( delete_status != 0 )); then
-            http_status="$(sed -n '1s/^HTTP\/[^ ]* \([0-9][0-9][0-9]\).*/\1/p' <<<"$delete_response")"
-            response_body="$(sed '1,/^[[:space:]]*$/d' <<<"$delete_response")"
-            if [[ "$http_status" =~ ^(404|422)$ ]] && grep -Eqi '"message"[[:space:]]*:[[:space:]]*"Reference does not exist"' <<<"$response_body"; then
+            http_status="$(sed -n '1s/^HTTP\/[^ ]* \([0-9][0-9][0-9]\).*/\1/p' "$delete_stdout")"
+            response_body="$(sed '1,/^[[:space:]]*$/d' "$delete_stdout")"
+            if ! response_message="$(jq -er 'if type == "object" and (.message | type) == "string" then .message else empty end' <<<"$response_body" 2>/dev/null)"; then
+              response_message=''
+            fi
+            if [[ "$http_status" == 404 && "$response_message" == 'Not Found' ]] \
+              || [[ "$http_status" == 422 && "$response_message" == 'Reference does not exist' ]]; then
               echo 'Sync branch was already absent after the successful merge.'
             else
-              echo "$delete_response" >&2
+              cat "$delete_stdout" "$delete_stderr" >&2
               false
             fi
           fi
+          rm -f "$delete_stdout" "$delete_stderr"
 
   report-workflow-failure:
     needs: [discover, validate, finalize]
