@@ -1,0 +1,344 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: unity-builder-upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPOSITORY: game-ci/unity-builder
+  SYNC_BRANCH: automation/upstream-sync
+  TRACKING_ISSUE_TITLE: '[upstream-sync] Review game-ci/unity-builder update'
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      candidate-sha: ${{ steps.sync.outputs.candidate_sha }}
+      pr-number: ${{ steps.sync.outputs.pr_number }}
+      upstream-sha: ${{ steps.sync.outputs.upstream_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - id: sync
+        name: Discover and classify upstream changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          tracked=unknown
+          upstream_sha=unknown
+          canonical_issue() {
+            local numbers duplicate
+            mapfile -t numbers < <(gh issue list --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number')
+            for duplicate in "${numbers[@]:1}"; do
+              gh issue close "$duplicate" --comment "Closing duplicate; continuing in #${numbers[0]}." >/dev/null
+            done
+            printf '%s' "${numbers[0]:-}"
+          }
+          upsert_issue() {
+            local body_file="$1"
+            local issue_number
+            issue_number="$(canonical_issue)"
+            if [[ -n "$issue_number" ]]; then
+              gh issue edit "$issue_number" --body-file "$body_file"
+              gh issue comment "$issue_number" --body "Upstream sync diagnostics refreshed by [run ${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+            else
+              gh issue create --title "$TRACKING_ISSUE_TITLE" --body-file "$body_file"
+            fi
+          }
+          report_error() {
+            local status="$1" line="$2" command="$3"
+            trap - ERR
+            {
+              echo 'Upstream was not consumed because sync automation failed.'
+              echo
+              echo "- Tracked upstream: \`${tracked}\`"
+              echo "- Observed upstream: \`${upstream_sha}\`"
+              echo "- Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              echo "- Exit status: \`${status}\` at line \`${line}\`"
+              echo
+              echo '### Failed command (truncated)'
+              echo '```text'
+              printf '%s' "${command:0:2000}"
+              echo
+              echo '```'
+              echo
+              echo 'Re-run the workflow after correcting the failure. No production tag was moved.'
+            } >/tmp/upstream-operational-failure.md
+            upsert_issue /tmp/upstream-operational-failure.md || true
+            exit "$status"
+          }
+          trap 'report_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          tracked="$(tr -d '[:space:]' < UPSTREAM_COMMIT)"
+          upstream_sha="$(git rev-parse upstream/main)"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=" >> "$GITHUB_OUTPUT"
+          echo "pr_number=" >> "$GITHUB_OUTPUT"
+
+          issue_number="$(canonical_issue)"
+          if [[ "$tracked" == "$upstream_sha" ]]; then
+            node scripts/verify-resource-cleanup-contract.mjs .
+            sync_pr="$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq '.[0].number // empty')"
+            if [[ -n "$sync_pr" ]]; then
+              gh pr close "$sync_pr" --comment "Superseded: fork main already records upstream \`${upstream_sha}\` and the cleanup contract passes."
+            fi
+            if [[ -n "$issue_number" ]]; then
+              gh issue comment "$issue_number" --body "Upstream is synchronized at \`${upstream_sha}\`; the lifecycle patch and generated distribution are current. Closing this tracking issue."
+              gh issue close "$issue_number"
+            fi
+            exit 0
+          fi
+
+          mapfile -t changed < <(git diff --name-only "$tracked" "$upstream_sha")
+          risky=()
+          safe=()
+          for file in "${changed[@]}"; do
+            case "$file" in
+              *.md|LICENSE|LICENSE.md|LICENSE.txt|CODE_OF_CONDUCT.md|media/*.png|media/*.jpg|media/*.jpeg|media/*.gif|media/*.svg)
+                safe+=("$file") ;;
+              *) risky+=("$file") ;;
+            esac
+          done
+
+          compare="https://github.com/${UPSTREAM_REPOSITORY}/compare/${tracked}...${upstream_sha}"
+          if (( ${#risky[@]} > 0 )); then
+            git checkout --detach "$GITHUB_SHA"
+            set +e
+            git merge --no-commit --no-ff "$upstream_sha" >/tmp/upstream-merge.log 2>&1
+            merge_status=$?
+            conflicts="$(git diff --name-only --diff-filter=U || true)"
+            git merge --abort >/dev/null 2>&1 || true
+            set -e
+            {
+              echo "Upstream advanced from \`${tracked}\` to \`${upstream_sha}\`."
+              echo
+              echo "Compare: ${compare}"
+              echo
+              echo "Executable/configuration changes are never consumed automatically, even when upstream tests pass."
+              echo
+              echo "### Review-required files"
+              printf -- '- `%s`\n' "${risky[@]}"
+              echo
+              echo "### Documentation-only files"
+              if (( ${#safe[@]} > 0 )); then printf -- '- `%s`\n' "${safe[@]}"; else echo '- None'; fi
+              echo
+              echo "### Merge probe"
+              echo "Status: ${merge_status}"
+              if [[ -n "$conflicts" ]]; then printf '%s\n' "$conflicts" | sed 's/^/- `/' | sed 's/$/`/'; else echo '- No textual conflicts detected'; fi
+              echo
+              echo "### Required lifecycle invariants"
+              echo '- RC001-RC003: `resourceSafe` defaults false before activation and becomes true only after owning-container proof.'
+              echo '- RC004-RC009: current-attempt nonce crosses a unique runner-temp mount, never the project workspace.'
+              echo '- RC010-RC011: Windows return writes exact proof only on return exit 0; `BUILD_EXIT_CODE` remains authoritative.'
+              echo '- RC012-RC013: generated `dist` contains the source contract and must be rebuilt.'
+              echo
+              echo "### Reproduction"
+              echo '```bash'
+              echo "git fetch https://github.com/${UPSTREAM_REPOSITORY}.git main"
+              echo "git checkout -b review-upstream-${upstream_sha:0:12} origin/main"
+              echo "git merge ${upstream_sha}"
+              echo 'corepack enable && corepack install'
+              echo 'yarn install --immutable'
+              echo 'node scripts/verify-resource-cleanup-contract.mjs .'
+              echo 'yarn lint && yarn typecheck && yarn test:ci && yarn build'
+              echo 'git diff --exit-code -- dist'
+              echo '```'
+            } >/tmp/upstream-issue.md
+            upsert_issue /tmp/upstream-issue.md
+            exit 0
+          fi
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch origin "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
+          git checkout -B "$SYNC_BRANCH" "$GITHUB_SHA"
+          git merge --no-edit "$upstream_sha"
+          printf '%s\n' "$upstream_sha" > UPSTREAM_COMMIT
+          git add UPSTREAM_COMMIT
+          git commit -m "chore: record upstream ${upstream_sha:0:12}"
+          git push --force-with-lease origin "$SYNC_BRANCH"
+          candidate_sha="$(git rev-parse HEAD)"
+          pr_number="$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq '.[0].number // empty')"
+          if [[ -z "$pr_number" ]]; then
+            gh pr create --base main --head "$SYNC_BRANCH" --title "chore: sync documentation from game-ci/unity-builder" --body "Automated documentation-only sync from [${tracked}...${upstream_sha}](${compare}). Executable and configuration changes are never auto-consumed."
+            pr_number="$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq '.[0].number')"
+          fi
+          echo "candidate_sha=${candidate_sha}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: discover
+    if: needs.discover.outputs.candidate-sha != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: _policy
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.discover.outputs.candidate-sha }}
+          path: _candidate
+          persist-credentials: false
+      - name: Verify lifecycle contract with trusted policy
+        run: node _policy/scripts/verify-resource-cleanup-contract.mjs _candidate
+      - name: Install package manager and dependencies
+        working-directory: _candidate
+        env:
+          YARN_ENABLE_HARDENED_MODE: 'false'
+        run: |
+          corepack enable
+          corepack install
+          yarn install --immutable
+      - name: Validate candidate
+        working-directory: _candidate
+        run: |
+          yarn lint
+          yarn typecheck
+          yarn test:ci
+          yarn build
+          git diff --exit-code -- dist
+
+  finalize:
+    needs: [discover, validate]
+    if: always() && needs.discover.outputs.candidate-sha != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Revalidate immutable metadata and merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.discover.outputs.candidate-sha }}
+          PR_NUMBER: ${{ needs.discover.outputs.pr-number }}
+          TARGET_UPSTREAM_SHA: ${{ needs.discover.outputs.upstream-sha }}
+          VALIDATION_RESULT: ${{ needs.validate.result }}
+        run: |
+          set -Eeuo pipefail
+          canonical_issue() {
+            local numbers duplicate
+            mapfile -t numbers < <(gh issue list --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number')
+            for duplicate in "${numbers[@]:1}"; do
+              gh issue close "$duplicate" --comment "Closing duplicate; continuing in #${numbers[0]}." >/dev/null
+            done
+            printf '%s' "${numbers[0]:-}"
+          }
+          report_error() {
+            local status="$1" line="$2" command="$3"
+            trap - ERR
+            issue_number="$(canonical_issue)"
+            {
+              echo "Documentation sync PR #${PR_NUMBER} was not merged."
+              echo
+              echo "- Validation: \`${VALIDATION_RESULT}\`"
+              echo "- Candidate: \`${CANDIDATE_SHA}\`"
+              echo "- Target upstream: \`${TARGET_UPSTREAM_SHA}\`"
+              echo "- Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              echo "- Exit status: \`${status}\` at line \`${line}\`"
+              echo
+              echo '### Failed command (truncated)'
+              echo '```text'
+              printf '%s' "${command:0:2000}"
+              echo
+              echo '```'
+              echo
+              echo 'Inspect the validation job and re-run sync. No production tag was moved.'
+            } >/tmp/upstream-finalize-failure.md
+            if [[ -n "$issue_number" ]]; then
+              gh issue edit "$issue_number" --body-file /tmp/upstream-finalize-failure.md || true
+            else
+              gh issue create --title "$TRACKING_ISSUE_TITLE" --body-file /tmp/upstream-finalize-failure.md || true
+            fi
+            exit "$status"
+          }
+          trap 'report_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+          current_upstream="$(git ls-remote "https://github.com/${UPSTREAM_REPOSITORY}.git" refs/heads/main | cut -f1)"
+          pr_metadata="$(gh pr view "$PR_NUMBER" --json headRefOid,headRefName,baseRefName,isCrossRepository)"
+          actual_head="$(jq -r .headRefOid <<<"$pr_metadata")"
+          actual_branch="$(jq -r .headRefName <<<"$pr_metadata")"
+          actual_base="$(jq -r .baseRefName <<<"$pr_metadata")"
+          cross_repository="$(jq -r .isCrossRepository <<<"$pr_metadata")"
+          if [[ "$VALIDATION_RESULT" != success || "$actual_head" != "$CANDIDATE_SHA" || "$actual_branch" != "$SYNC_BRANCH" || "$actual_base" != main || "$cross_repository" != false || "$current_upstream" != "$TARGET_UPSTREAM_SHA" ]]; then
+            echo "Candidate metadata changed: head=${actual_head}, branch=${actual_branch}, base=${actual_base}, cross-repository=${cross_repository}, upstream=${current_upstream}" >&2
+            false
+          fi
+          mapfile -t changed < <(git diff --name-only "$(tr -d '[:space:]' < UPSTREAM_COMMIT)" "$TARGET_UPSTREAM_SHA")
+          for file in "${changed[@]}"; do
+            case "$file" in
+              *.md|LICENSE|LICENSE.md|LICENSE.txt|CODE_OF_CONDUCT.md|media/*.png|media/*.jpg|media/*.jpeg|media/*.gif|media/*.svg) ;;
+              *) echo "Refusing changed executable/configuration path: $file"; false ;;
+            esac
+          done
+          pull_request_id="$(gh pr view "$PR_NUMBER" --json id --jq .id)"
+          gh api graphql \
+            -f query='mutation($id:ID!,$head:GitObjectID!){mergePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head,mergeMethod:MERGE}){pullRequest{state headRefOid}}}' \
+            -f id="$pull_request_id" \
+            -f head="$CANDIDATE_SHA" \
+            --jq '.data.mergePullRequest.pullRequest | select(.state == "MERGED" and .headRefOid == env.CANDIDATE_SHA) | .state' \
+            | grep -qx MERGED
+          git push origin --delete "$SYNC_BRANCH" || true
+
+  report-workflow-failure:
+    needs: [discover, validate, finalize]
+    if: >-
+      always() &&
+      (needs.discover.result == 'failure' ||
+       needs.validate.result == 'failure' ||
+       needs.finalize.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Ensure the failed sync has a singleton tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISCOVER_RESULT: ${{ needs.discover.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          FINALIZE_RESULT: ${{ needs.finalize.result }}
+        run: |
+          set -euo pipefail
+          mapfile -t numbers < <(gh issue list --repo "$GITHUB_REPOSITORY" --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number')
+          canonical="${numbers[0]:-}"
+          for duplicate in "${numbers[@]:1}"; do
+            gh issue close "$duplicate" --repo "$GITHUB_REPOSITORY" --comment "Closing duplicate; continuing in #${canonical}." >/dev/null
+          done
+          {
+            echo 'Upstream sync did not consume the observed update because automation failed.'
+            echo
+            echo "- Discover: \`${DISCOVER_RESULT}\`"
+            echo "- Validate: \`${VALIDATE_RESULT}\`"
+            echo "- Finalize: \`${FINALIZE_RESULT}\`"
+            echo "- Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo 'Inspect the failed job and re-run `Upstream Sync`. No immutable production tag was moved.'
+          } >/tmp/upstream-workflow-failure.md
+          if [[ -n "$canonical" ]]; then
+            gh issue comment "$canonical" --repo "$GITHUB_REPOSITORY" --body "A sync job failed in [run ${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) (discover=\`${DISCOVER_RESULT}\`, validate=\`${VALIDATE_RESULT}\`, finalize=\`${FINALIZE_RESULT}\`). The detailed canonical diagnostics above were preserved."
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TRACKING_ISSUE_TITLE" --body-file /tmp/upstream-workflow-failure.md
+          fi

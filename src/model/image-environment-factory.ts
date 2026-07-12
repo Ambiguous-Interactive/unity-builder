@@ -42,6 +42,14 @@ class ImageEnvironmentFactory {
       { name: 'SKIP_ACTIVATION', value: parameters.skipActivation },
       { name: 'UNITY_VERSION', value: parameters.editorVersion },
       {
+        name: 'UNITY_BUILDER_RESOURCE_PROOF_NONCE',
+        value: process.env.UNITY_BUILDER_RESOURCE_PROOF_NONCE,
+      },
+      {
+        name: 'UNITY_BUILDER_RESOURCE_PROOF_PATH',
+        value: process.env.UNITY_BUILDER_RESOURCE_PROOF_PATH,
+      },
+      {
         name: 'USYM_UPLOAD_AUTH_TOKEN',
         value: process.env.USYM_UPLOAD_AUTH_TOKEN,
       },

@@ -12,6 +12,14 @@ class Output {
   static async setEngineExitCode(exitCode: number) {
     core.setOutput('engineExitCode', exitCode);
   }
+
+  static async setResourceSafe(resourceSafe: boolean) {
+    try {
+      core.setOutput('resourceSafe', resourceSafe ? 'true' : 'false');
+    } catch (error) {
+      console.warn(`Could not publish resourceSafe output: ${String(error)}`);
+    }
+  }
 }
 
 export default Output;

@@ -63,6 +63,15 @@ vi.mock('./model', () => ({
     setBuildVersion: vi.fn().mockResolvedValue(''),
     setAndroidVersionCode: vi.fn().mockResolvedValue(''),
     setEngineExitCode: vi.fn().mockResolvedValue(''),
+    setResourceSafe: vi.fn().mockResolvedValue(''),
+  },
+  ResourceCleanupProof: {
+    begin: vi.fn().mockReturnValue({
+      directory: '/proof/current',
+      filePath: '/proof/current/proof',
+      nonce: 'current-nonce',
+    }),
+    consume: vi.fn().mockReturnValue(true),
   },
 }));
 
@@ -118,6 +127,7 @@ describe('index.ts plugin lifecycle wiring', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.GITHUB_WORKSPACE = '/workspace';
+    process.env.RUNNER_TEMP = '/runner-temp';
     Object.defineProperty(process, 'platform', { value: 'linux' });
 
     // Reset plugin to default behavior
@@ -136,6 +146,35 @@ describe('index.ts plugin lifecycle wiring', () => {
   // -----------------------------------------------------------------------
 
   describe('local build with plugin installed', () => {
+    it('publishes owning-container cleanup proof for a completed Windows build', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const { Output, ResourceCleanupProof } = await import('./model');
+
+      await runIndex({ targetPlatform: 'StandaloneWindows64' });
+
+      expect(ResourceCleanupProof.begin).toHaveBeenCalledWith('/runner-temp');
+      expect(ResourceCleanupProof.consume).toHaveBeenCalledWith({
+        directory: '/proof/current',
+        filePath: '/proof/current/proof',
+        nonce: 'current-nonce',
+      });
+      expect(Output.setResourceSafe).toHaveBeenNthCalledWith(1, false);
+      expect(Output.setResourceSafe).toHaveBeenNthCalledWith(2, true);
+    });
+
+    it('consumes proof and remains unsafe when the Windows build throws', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      vi.mocked(Docker.run).mockRejectedValueOnce(new Error('simulated Docker failure'));
+      const { Output, ResourceCleanupProof } = await import('./model');
+
+      await runIndex({ targetPlatform: 'StandaloneWindows64' });
+
+      expect(ResourceCleanupProof.consume).toHaveBeenCalledOnce();
+      expect(Output.setResourceSafe).toHaveBeenNthCalledWith(1, false);
+      expect(Output.setResourceSafe).toHaveBeenNthCalledWith(2, false);
+      expect(core.setFailed).toHaveBeenCalledWith('simulated Docker failure');
+    });
+
     it('should call lifecycle hooks in order: initialize -> beforeLocalBuild -> [build] -> afterLocalBuild -> handlePostBuild', async () => {
       const callOrder: string[] = [];
       mockPlugin.initialize.mockImplementation(async () => callOrder.push('initialize'));

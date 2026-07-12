@@ -113,6 +113,7 @@ class Docker {
 
     const githubHome = path.join(runnerTempPath, '_github_home');
     if (!existsSync(githubHome)) mkdirSync(githubHome);
+    const resourceProofDirectory = process.env.UNITY_BUILDER_RESOURCE_PROOF_DIRECTORY;
 
     return `docker run \
             --workdir c:${dockerWorkspacePath} \
@@ -132,6 +133,7 @@ class Docker {
             --volume "${actionFolder}/platforms/windows":"c:/steps" \
             --volume "${actionFolder}/unity-config":"C:/ProgramData/Unity/config" \
             --volume "${actionFolder}/BlankProject":"c:/BlankProject" \
+            ${resourceProofDirectory ? `--volume "${resourceProofDirectory}":"c:/unity-resource-proof"` : ''} \
             --cpus=${dockerCpuLimit} \
             --memory=${dockerMemoryLimit} \
             --isolation=${dockerIsolationMode} \

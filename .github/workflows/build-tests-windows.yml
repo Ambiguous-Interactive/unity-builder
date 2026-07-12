@@ -9,6 +9,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  resource-cleanup-proof-contract:
+    name: Resource cleanup proof contract
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: ./scripts/test-windows-resource-proof.ps1
+
   buildForAllPlatformsWindows:
     name: ${{ matrix.targetPlatform }} on ${{ matrix.unityVersion }}
     runs-on: windows-2022
