@@ -307,7 +307,18 @@ jobs:
             -f head="$CANDIDATE_SHA" \
             --jq '.data.mergePullRequest.pullRequest | select(.state == "MERGED" and .headRefOid == env.CANDIDATE_SHA) | .state' \
             | grep -qx MERGED
-          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${SYNC_BRANCH}" --silent
+          set +e
+          delete_response="$(gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${SYNC_BRANCH}" --include 2>&1)"
+          delete_status=$?
+          set -e
+          if (( delete_status != 0 )); then
+            if grep -Eq '^HTTP/[^ ]+ (404|422)' <<<"$delete_response" && grep -Eqi 'reference.*(does not exist|not found)|not found' <<<"$delete_response"; then
+              echo 'Sync branch was already absent after the successful merge.'
+            else
+              echo "$delete_response" >&2
+              false
+            fi
+          fi
 
   report-workflow-failure:
     needs: [discover, validate, finalize]
