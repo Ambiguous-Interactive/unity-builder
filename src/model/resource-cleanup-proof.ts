@@ -15,6 +15,9 @@ class ResourceCleanupProof {
   static readonly containerPath = 'c:/unity-resource-proof/proof';
 
   static begin(runnerTemp: string): CleanupProofAttempt | undefined {
+    delete process.env[ResourceCleanupProof.environmentName];
+    delete process.env[ResourceCleanupProof.hostDirectoryEnvironmentName];
+    delete process.env[ResourceCleanupProof.containerPathEnvironmentName];
     if (!runnerTemp) {
       console.warn('RUNNER_TEMP is unavailable; Unity cleanup proof remains false.');
       return undefined;

@@ -74,6 +74,26 @@ describe('ResourceCleanupProof', () => {
     expect(ResourceCleanupProof.begin(runnerTempPath)).toBeUndefined();
   });
 
+  it.each([
+    ['missing runner temp', ''],
+    ['runner temp is a file', 'file'],
+  ])('clears stale proof env vars when setup fails: %s', (_name, kind) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    process.env[ResourceCleanupProof.environmentName] = 'stale-nonce';
+    process.env[ResourceCleanupProof.hostDirectoryEnvironmentName] = '/stale/directory';
+    process.env[ResourceCleanupProof.containerPathEnvironmentName] = 'c:/stale/path';
+
+    const root = runnerTemp();
+    const runnerTempPath = kind === 'file' ? path.join(root, 'not-a-directory') : '';
+    if (runnerTempPath) writeFileSync(runnerTempPath, 'x');
+
+    ResourceCleanupProof.begin(runnerTempPath);
+
+    expect(process.env[ResourceCleanupProof.environmentName]).toBeUndefined();
+    expect(process.env[ResourceCleanupProof.hostDirectoryEnvironmentName]).toBeUndefined();
+    expect(process.env[ResourceCleanupProof.containerPathEnvironmentName]).toBeUndefined();
+  });
+
   it('does not throw or report safe when proof-directory cleanup fails', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const root = runnerTemp();
