@@ -134,6 +134,9 @@ if (
 )
   failures.push('RC014: Windows canary must atomically require the lifecycle-aware lock contract');
 const windowsRelease = windowsSteps.find((step) => step.name === 'Release organization Unity lock');
+const windowsVerify = windowsSteps.find(
+  (step) => step.name === 'Verify activation-owning cleanup proof',
+);
 const cleanupProof = windowsStep('cleanup-proof');
 const expectedReleaseCondition =
   "${{ always() && (steps.acquire-build-lock.outcome == 'success' || steps.acquire-build-lock.outcome == 'failure' || steps.acquire-build-lock.outcome == 'cancelled') }}";
@@ -148,6 +151,12 @@ if (
   )
 )
   failures.push('RC014: cleanup classifier must inspect every attempted build under always()');
+if (
+  windowsVerify?.if !== '${{ always() }}' ||
+  windowsVerify?.env?.LOCK_ACQUIRED !== '${{ steps.acquire-build-lock.outputs.acquired }}' ||
+  !windowsVerify?.run?.includes("if ($env:LOCK_ACQUIRED -ne 'true')")
+)
+  failures.push('RC014: Windows canary must fail after release when lock ownership was not acquired');
 const expectedRunnerId =
   '${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}';
 const expectedHolderSuffix = '${{ github.job }}-${{ strategy.job-index }}';
