@@ -36,7 +36,12 @@ requireOrder('RC003', 'src/index.ts', [
   'Docker.run',
   'ResourceCleanupProof.consume',
 ]);
-requireText('RC004', 'src/model/resource-cleanup-proof.ts', 'randomUUID()');
+requireText(
+  'RC004',
+  'src/model/resource-cleanup-proof.ts',
+  'nonceFactory: () => string = randomUUID',
+);
+requireText('RC004', 'src/model/resource-cleanup-proof.ts', 'const nonce = nonceFactory();');
 requireText(
   'RC005',
   'src/model/resource-cleanup-proof.ts',

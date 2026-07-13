@@ -14,7 +14,7 @@ class ResourceCleanupProof {
   static readonly containerPathEnvironmentName = 'UNITY_BUILDER_RESOURCE_PROOF_PATH';
   static readonly containerPath = 'c:/unity-resource-proof/proof';
 
-  static begin(runnerTemp: string): CleanupProofAttempt | undefined {
+  static begin(runnerTemp: string, nonceFactory: () => string = randomUUID): CleanupProofAttempt | undefined {
     delete process.env[ResourceCleanupProof.environmentName];
     delete process.env[ResourceCleanupProof.hostDirectoryEnvironmentName];
     delete process.env[ResourceCleanupProof.containerPathEnvironmentName];
@@ -22,15 +22,26 @@ class ResourceCleanupProof {
       console.warn('RUNNER_TEMP is unavailable; Unity cleanup proof remains false.');
       return undefined;
     }
+    let directory: string | undefined;
     try {
-      const directory = mkdtempSync(path.join(runnerTemp, 'unity-cleanup-proof-'));
-      const nonce = randomUUID();
+      directory = mkdtempSync(path.join(runnerTemp, 'unity-cleanup-proof-'));
+      const nonce = nonceFactory();
       process.env[ResourceCleanupProof.environmentName] = nonce;
       process.env[ResourceCleanupProof.hostDirectoryEnvironmentName] = directory;
       process.env[ResourceCleanupProof.containerPathEnvironmentName] =
         ResourceCleanupProof.containerPath;
       return { directory, filePath: path.join(directory, 'proof'), nonce };
     } catch (error) {
+      if (directory) {
+        try {
+          rmSync(directory, { recursive: true, force: true });
+        } catch (cleanupError) {
+          console.warn(`Unity cleanup proof setup directory could not be removed: ${String(cleanupError)}`);
+        }
+      }
+      delete process.env[ResourceCleanupProof.environmentName];
+      delete process.env[ResourceCleanupProof.hostDirectoryEnvironmentName];
+      delete process.env[ResourceCleanupProof.containerPathEnvironmentName];
       console.warn(`Unity cleanup proof setup failed; proof remains false: ${String(error)}`);
       return undefined;
     }

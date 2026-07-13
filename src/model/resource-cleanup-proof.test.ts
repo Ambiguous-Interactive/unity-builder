@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -89,6 +89,21 @@ describe('ResourceCleanupProof', () => {
 
     ResourceCleanupProof.begin(runnerTempPath);
 
+    expect(process.env[ResourceCleanupProof.environmentName]).toBeUndefined();
+    expect(process.env[ResourceCleanupProof.hostDirectoryEnvironmentName]).toBeUndefined();
+    expect(process.env[ResourceCleanupProof.containerPathEnvironmentName]).toBeUndefined();
+  });
+
+  it('removes partial setup state when nonce creation fails', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const root = runnerTemp();
+
+    expect(
+      ResourceCleanupProof.begin(root, () => {
+        throw new Error('simulated nonce failure');
+      }),
+    ).toBeUndefined();
+    expect(readdirSync(root)).toEqual([]);
     expect(process.env[ResourceCleanupProof.environmentName]).toBeUndefined();
     expect(process.env[ResourceCleanupProof.hostDirectoryEnvironmentName]).toBeUndefined();
     expect(process.env[ResourceCleanupProof.containerPathEnvironmentName]).toBeUndefined();
