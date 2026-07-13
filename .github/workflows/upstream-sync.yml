@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
       - id: sync
         name: Discover and classify upstream changes
         env:
@@ -71,6 +71,13 @@ jobs:
               [[ -z "$pr" ]] || gh pr close "$pr" --comment "$1"
             done </tmp/upstream-sync-pr-numbers
           }
+          verify_contract() {
+            rm -rf /tmp/upstream-verifier
+            mkdir -p /tmp/upstream-verifier
+            npm install --prefix /tmp/upstream-verifier --ignore-scripts --no-save --package-lock=false --no-audit --no-fund yaml@2.8.4
+            cp scripts/verify-resource-cleanup-contract.mjs /tmp/upstream-verifier/verify.mjs
+            node /tmp/upstream-verifier/verify.mjs .
+          }
           report_error() {
             local status="$1" line="$2" command="$3"
             trap - ERR
@@ -105,7 +112,7 @@ jobs:
 
           issue_number="$(canonical_issue)"
           if [[ "$tracked" == "$upstream_sha" ]]; then
-            node scripts/verify-resource-cleanup-contract.mjs .
+            verify_contract
             close_sync_pr "Superseded: fork main already records upstream \`${upstream_sha}\` and the cleanup contract passes."
             if [[ -n "$issue_number" ]]; then
               gh issue comment "$issue_number" --body "Upstream is synchronized at \`${upstream_sha}\`; the lifecycle patch and generated distribution are current. Closing this tracking issue."
@@ -205,6 +212,7 @@ jobs:
           printf '%s\n' "$upstream_sha" > UPSTREAM_COMMIT
           git add UPSTREAM_COMMIT
           git commit -m "chore: record upstream ${upstream_sha:0:12}"
+          gh auth setup-git
           git push --force-with-lease origin "$SYNC_BRANCH"
           candidate_sha="$(git rev-parse HEAD)"
           pr_number="$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq '.[0].number // empty')"
@@ -234,8 +242,13 @@ jobs:
           ref: ${{ needs.discover.outputs.candidate-sha }}
           path: _candidate
           persist-credentials: false
+      - name: Install trusted verifier parser
+        run: |
+          mkdir -p /tmp/upstream-verifier
+          npm install --prefix /tmp/upstream-verifier --ignore-scripts --no-save --package-lock=false --no-audit --no-fund yaml@2.8.4
+          cp _policy/scripts/verify-resource-cleanup-contract.mjs /tmp/upstream-verifier/verify.mjs
       - name: Verify lifecycle contract with trusted policy
-        run: node _policy/scripts/verify-resource-cleanup-contract.mjs _candidate
+        run: node /tmp/upstream-verifier/verify.mjs _candidate
       - name: Install package manager and dependencies
         working-directory: _candidate
         env:
