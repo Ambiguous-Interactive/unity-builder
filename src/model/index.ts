@@ -7,6 +7,7 @@ import ImageTag from './image-tag';
 import Output from './output';
 import Platform from './platform';
 import Project from './project';
+import ResourceCleanupProof from './resource-cleanup-proof';
 import Unity from './unity';
 import Versioning from './versioning';
 
@@ -20,6 +21,7 @@ export {
   Output,
   Platform,
   Project,
+  ResourceCleanupProof,
   Unity,
   Versioning,
 };

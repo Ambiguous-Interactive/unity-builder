@@ -2,18 +2,17 @@ name: Builds - MacOS
 
 on:
   workflow_dispatch:
-  push:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   buildForAllPlatformsMacOS:
     name: ${{ matrix.targetPlatform }} on ${{ matrix.unityVersion }}
+    # The fork cannot run this paid-license matrix until macOS cleanup emits
+    # lifecycle proof equivalent to the Windows owning-container proof.
+    if: ${{ github.repository == 'game-ci/unity-builder' }}
     runs-on: macos-latest
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         projectPath:
           - test-project

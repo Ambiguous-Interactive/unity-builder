@@ -2,11 +2,6 @@ name: Builds - Ubuntu
 
 on:
   workflow_dispatch:
-  push:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 env:
   UNITY_LICENSE: "<?xml version=\"1.0\" encoding=\"UTF-8\"?><root>\n    <License
@@ -39,6 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         providerStrategy:
           # - local-docker

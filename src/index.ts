@@ -1,5 +1,13 @@
 import * as core from '@actions/core';
-import { Action, BuildParameters, Cache, Docker, ImageTag, Output } from './model';
+import {
+  Action,
+  BuildParameters,
+  Cache,
+  Docker,
+  ImageTag,
+  Output,
+  ResourceCleanupProof,
+} from './model';
 import MacBuilder from './model/mac-builder';
 import PlatformSetup from './model/platform-setup';
 import { Plugin, loadPlugin } from './model/plugin';
@@ -10,6 +18,7 @@ export async function runMain() {
   try {
     Action.checkCompatibility();
     Cache.verify();
+    await Output.setResourceSafe(false);
 
     const { workspace, actionFolder } = Action;
     const buildParameters = await BuildParameters.create();
@@ -63,14 +72,28 @@ async function runLocalBuild(
   await plugin?.beforeLocalBuild(workspace);
 
   await PlatformSetup.setup(buildParameters, actionFolder);
-  const exitCode =
-    process.platform === 'darwin'
-      ? await MacBuilder.run(actionFolder)
-      : await Docker.run(baseImage.toString(), {
-          workspace,
-          actionFolder,
-          ...buildParameters,
-        });
+  const proofAttempt =
+    process.platform === 'win32'
+      ? ResourceCleanupProof.begin(process.env.RUNNER_TEMP ?? '')
+      : undefined;
+  let buildCompleted = false;
+  let exitCode: number;
+  try {
+    exitCode =
+      process.platform === 'darwin'
+        ? await MacBuilder.run(actionFolder)
+        : await Docker.run(baseImage.toString(), {
+            workspace,
+            actionFolder,
+            ...buildParameters,
+          });
+    buildCompleted = true;
+  } finally {
+    if (proofAttempt) {
+      const proofSafe = ResourceCleanupProof.consume(proofAttempt);
+      await Output.setResourceSafe(buildCompleted && proofSafe);
+    }
+  }
 
   await plugin?.afterLocalBuild(workspace, exitCode);
 
