@@ -43,7 +43,9 @@ jobs:
           upstream_sha=unknown
           canonical_issue() {
             local numbers duplicate
-            gh issue list --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number' >/tmp/upstream-issue-numbers
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" \
+              --jq '.[] | select((has("pull_request") | not) and .title == env.TRACKING_ISSUE_TITLE) | .number' \
+              | sort -n >/tmp/upstream-issue-numbers
             mapfile -t numbers </tmp/upstream-issue-numbers
             for duplicate in "${numbers[@]:1}"; do
               gh issue close "$duplicate" --comment "Closing duplicate; continuing in #${numbers[0]}." >/dev/null
@@ -54,12 +56,20 @@ jobs:
             local body_file="$1"
             local issue_number
             issue_number="$(canonical_issue)"
-            if [[ -n "$issue_number" ]]; then
-              gh issue edit "$issue_number" --body-file "$body_file"
-              gh issue comment "$issue_number" --body "Upstream sync diagnostics refreshed by [run ${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
-            else
+            if [[ -z "$issue_number" ]]; then
               gh issue create --title "$TRACKING_ISSUE_TITLE" --body-file "$body_file"
             fi
+            # Re-list after creation so racing reporters converge on the oldest issue.
+            issue_number="$(canonical_issue)"
+            gh issue edit "$issue_number" --body-file "$body_file"
+            gh issue comment "$issue_number" --body "Upstream sync diagnostics refreshed by [run ${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+          }
+          close_sync_pr() {
+            local pr
+            gh pr list --limit 100 --state open --head "$SYNC_BRANCH" --json number --jq '.[].number' >/tmp/upstream-sync-pr-numbers
+            while read -r pr; do
+              [[ -z "$pr" ]] || gh pr close "$pr" --comment "$1"
+            done </tmp/upstream-sync-pr-numbers
           }
           report_error() {
             local status="$1" line="$2" command="$3"
@@ -84,6 +94,7 @@ jobs:
             exit "$status"
           }
           trap 'report_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+          [[ "$GITHUB_REF" == refs/heads/main ]]
           git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
           git fetch --no-tags upstream main
           tracked="$(tr -d '[:space:]' < UPSTREAM_COMMIT)"
@@ -95,14 +106,33 @@ jobs:
           issue_number="$(canonical_issue)"
           if [[ "$tracked" == "$upstream_sha" ]]; then
             node scripts/verify-resource-cleanup-contract.mjs .
-            sync_pr="$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq '.[0].number // empty')"
-            if [[ -n "$sync_pr" ]]; then
-              gh pr close "$sync_pr" --comment "Superseded: fork main already records upstream \`${upstream_sha}\` and the cleanup contract passes."
-            fi
+            close_sync_pr "Superseded: fork main already records upstream \`${upstream_sha}\` and the cleanup contract passes."
             if [[ -n "$issue_number" ]]; then
               gh issue comment "$issue_number" --body "Upstream is synchronized at \`${upstream_sha}\`; the lifecycle patch and generated distribution are current. Closing this tracking issue."
               gh issue close "$issue_number"
             fi
+            exit 0
+          fi
+
+          if ! git cat-file -e "${tracked}^{commit}" 2>/dev/null \
+            || ! git merge-base --is-ancestor "$tracked" "$GITHUB_SHA" \
+            || ! git merge-base --is-ancestor "$tracked" "$upstream_sha"; then
+            {
+              echo "Upstream advanced from recorded commit \`${tracked}\` to \`${upstream_sha}\`, but the recorded commit is not a common ancestor of fork main and upstream main."
+              echo
+              echo 'Automatic documentation merging is disabled because a merge could otherwise import executable changes outside the path allowlist.'
+              echo
+              echo '### Required repair'
+              echo "1. Compare fork main, \`${tracked}\`, and \`${upstream_sha}\` and identify the divergent commits."
+              echo '2. Manually merge or rebase upstream into a review branch and preserve the RC001-RC014 lifecycle invariants.'
+              echo '3. Run the lifecycle verifier, lint, typecheck, tests, build, and generated-distribution diff check.'
+              echo '4. Update `UPSTREAM_COMMIT` only in the reviewed merge that contains the target upstream commit.'
+              echo
+              echo "Compare: https://github.com/${UPSTREAM_REPOSITORY}/compare/${tracked}...${upstream_sha}"
+              echo "Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            } >/tmp/upstream-ancestry-review.md
+            close_sync_pr "Closed because upstream ancestry diverged; automatic merging is unsafe. See the upstream-sync tracking issue."
+            upsert_issue /tmp/upstream-ancestry-review.md
             exit 0
           fi
 
@@ -120,6 +150,7 @@ jobs:
 
           compare="https://github.com/${UPSTREAM_REPOSITORY}/compare/${tracked}...${upstream_sha}"
           if (( ${#risky[@]} > 0 )); then
+            close_sync_pr "Closed because the latest upstream update contains executable or configuration changes requiring manual review. See the upstream-sync tracking issue."
             git checkout --detach "$GITHUB_SHA"
             set +e
             git merge --no-commit --no-ff "$upstream_sha" >/tmp/upstream-merge.log 2>&1
@@ -180,6 +211,8 @@ jobs:
           if [[ -z "$pr_number" ]]; then
             gh pr create --base main --head "$SYNC_BRANCH" --title "chore: sync documentation from game-ci/unity-builder" --body "Automated documentation-only sync from [${tracked}...${upstream_sha}](${compare}). Executable and configuration changes are never auto-consumed."
             pr_number="$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq '.[0].number')"
+          else
+            gh pr edit "$pr_number" --title "chore: sync documentation from game-ci/unity-builder" --body "Automated documentation-only sync from [${tracked}...${upstream_sha}](${compare}). Executable and configuration changes are never auto-consumed."
           fi
           echo "candidate_sha=${candidate_sha}" >> "$GITHUB_OUTPUT"
           echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
@@ -244,19 +277,51 @@ jobs:
           set -Eeuo pipefail
           canonical_issue() {
             local numbers duplicate
-            gh issue list --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number' >/tmp/upstream-issue-numbers
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" \
+              --jq '.[] | select((has("pull_request") | not) and .title == env.TRACKING_ISSUE_TITLE) | .number' \
+              | sort -n >/tmp/upstream-issue-numbers
             mapfile -t numbers </tmp/upstream-issue-numbers
             for duplicate in "${numbers[@]:1}"; do
               gh issue close "$duplicate" --comment "Closing duplicate; continuing in #${numbers[0]}." >/dev/null
             done
             printf '%s' "${numbers[0]:-}"
           }
+          upsert_issue() {
+            local body_file="$1"
+            local issue_number
+            issue_number="$(canonical_issue)"
+            if [[ -z "$issue_number" ]]; then
+              gh issue create --title "$TRACKING_ISSUE_TITLE" --body-file "$body_file" >/dev/null
+            fi
+            issue_number="$(canonical_issue)"
+            gh issue edit "$issue_number" --body-file "$body_file" >/dev/null
+          }
           report_error() {
             local status="$1" line="$2" command="$3"
+            local observed_head observed_pr observed_state
             trap - ERR
-            issue_number="$(canonical_issue)"
+            if [[ "$merge_completed" != true ]]; then
+              observed_pr="$(gh pr view "$PR_NUMBER" --json state,headRefOid 2>/dev/null || true)"
+              observed_state="$(jq -r '.state // empty' <<<"$observed_pr" 2>/dev/null || true)"
+              observed_head="$(jq -r '.headRefOid // empty' <<<"$observed_pr" 2>/dev/null || true)"
+              if [[ "$observed_state" == MERGED && "$observed_head" == "$CANDIDATE_SHA" ]]; then
+                merge_completed=true
+              elif [[ "$observed_state" == MERGED ]]; then
+                merge_head_mismatch=true
+              elif [[ "$observed_state" != OPEN && "$observed_state" != CLOSED ]]; then
+                merge_state_unknown=true
+              fi
+            fi
             {
-              echo "Documentation sync PR #${PR_NUMBER} was not merged."
+              if [[ "$merge_completed" == true ]]; then
+                echo "Documentation sync PR #${PR_NUMBER} merged, but post-merge cleanup failed."
+              elif [[ "$merge_head_mismatch" == true ]]; then
+                echo "Documentation sync PR #${PR_NUMBER} merged at unexpected head \`${observed_head}\`; the reviewed candidate's merge state is unsafe."
+              elif [[ "$merge_state_unknown" == true ]]; then
+                echo "Documentation sync PR #${PR_NUMBER} may have merged; its state could not be confirmed after the failure."
+              else
+                echo "Documentation sync PR #${PR_NUMBER} was not merged."
+              fi
               echo
               echo "- Validation: \`${VALIDATION_RESULT}\`"
               echo "- Candidate: \`${CANDIDATE_SHA}\`"
@@ -270,15 +335,22 @@ jobs:
               echo
               echo '```'
               echo
-              echo 'Inspect the validation job and re-run sync. No production tag was moved.'
+              if [[ "$merge_completed" == true ]]; then
+                echo 'The reviewed upstream commit is already on main. Inspect and repair the reported cleanup failure; do not re-merge the PR. No production tag was moved.'
+              elif [[ "$merge_head_mismatch" == true ]]; then
+                echo 'Inspect the unexpected merged commit and main branch before taking action. Do not re-run sync until the divergence is understood. No production tag was moved.'
+              elif [[ "$merge_state_unknown" == true ]]; then
+                echo 'Inspect the PR and main branch before taking action. Re-run sync only after confirming the candidate was not merged. No production tag was moved.'
+              else
+                echo 'Inspect the validation job and re-run sync. No production tag was moved.'
+              fi
             } >/tmp/upstream-finalize-failure.md
-            if [[ -n "$issue_number" ]]; then
-              gh issue edit "$issue_number" --body-file /tmp/upstream-finalize-failure.md || true
-            else
-              gh issue create --title "$TRACKING_ISSUE_TITLE" --body-file /tmp/upstream-finalize-failure.md || true
-            fi
+            upsert_issue /tmp/upstream-finalize-failure.md || true
             exit "$status"
           }
+          merge_completed=false
+          merge_head_mismatch=false
+          merge_state_unknown=false
           trap 'report_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
           current_upstream="$(git ls-remote "https://github.com/${UPSTREAM_REPOSITORY}.git" refs/heads/main | cut -f1)"
           pr_metadata="$(gh pr view "$PR_NUMBER" --json headRefOid,headRefName,baseRefName,isCrossRepository)"
@@ -292,11 +364,21 @@ jobs:
           fi
           git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
           git fetch --no-tags upstream main
-          git diff --name-only --no-renames "$(tr -d '[:space:]' < UPSTREAM_COMMIT)" "$TARGET_UPSTREAM_SHA" >/tmp/upstream-changed-files
+          git fetch --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+          tracked="$(tr -d '[:space:]' < UPSTREAM_COMMIT)"
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse "refs/remotes/origin/${SYNC_BRANCH}")" == "$CANDIDATE_SHA" ]]
+          [[ "$(git show "${CANDIDATE_SHA}:UPSTREAM_COMMIT" | tr -d '[:space:]')" == "$TARGET_UPSTREAM_SHA" ]]
+          git merge-base --is-ancestor "$tracked" origin/main
+          git merge-base --is-ancestor "$tracked" "$TARGET_UPSTREAM_SHA"
+          git merge-base --is-ancestor "$TARGET_UPSTREAM_SHA" "$CANDIDATE_SHA"
+          git diff --name-only --no-renames origin/main "$CANDIDATE_SHA" >/tmp/upstream-changed-files
           mapfile -t changed </tmp/upstream-changed-files
           for file in "${changed[@]}"; do
             case "$file" in
-              *.md|LICENSE|LICENSE.md|LICENSE.txt|CODE_OF_CONDUCT.md|media/*.png|media/*.jpg|media/*.jpeg|media/*.gif|media/*.svg) ;;
+              UPSTREAM_COMMIT|*.md|LICENSE|LICENSE.md|LICENSE.txt|CODE_OF_CONDUCT.md|media/*.png|media/*.jpg|media/*.jpeg|media/*.gif|media/*.svg) ;;
               *) echo "Refusing changed executable/configuration path: $file"; false ;;
             esac
           done
@@ -307,6 +389,7 @@ jobs:
             -f head="$CANDIDATE_SHA" \
             --jq '.data.mergePullRequest.pullRequest | select(.state == "MERGED" and .headRefOid == env.CANDIDATE_SHA) | .state' \
             | grep -qx MERGED
+          merge_completed=true
           delete_stdout="$(mktemp)"
           delete_stderr="$(mktemp)"
           set +e
@@ -348,12 +431,20 @@ jobs:
           FINALIZE_RESULT: ${{ needs.finalize.result }}
         run: |
           set -euo pipefail
-          gh issue list --repo "$GITHUB_REPOSITORY" --limit 100 --state open --search "${TRACKING_ISSUE_TITLE} in:title" --json number,title --jq '.[] | select(.title == env.TRACKING_ISSUE_TITLE) | .number' >/tmp/upstream-issue-numbers
-          mapfile -t numbers </tmp/upstream-issue-numbers
-          canonical="${numbers[0]:-}"
-          for duplicate in "${numbers[@]:1}"; do
-            gh issue close "$duplicate" --repo "$GITHUB_REPOSITORY" --comment "Closing duplicate; continuing in #${canonical}." >/dev/null
-          done
+          canonical_issue() {
+            local numbers duplicate
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" \
+              --jq '.[] | select((has("pull_request") | not) and .title == env.TRACKING_ISSUE_TITLE) | .number' \
+              | sort -n >/tmp/upstream-issue-numbers
+            mapfile -t numbers </tmp/upstream-issue-numbers
+            for duplicate in "${numbers[@]:1}"; do
+              gh issue close "$duplicate" --repo "$GITHUB_REPOSITORY" --comment "Closing duplicate; continuing in #${numbers[0]}." >/dev/null
+            done
+            printf '%s' "${numbers[0]:-}"
+          }
+          canonical="$(canonical_issue)"
+          issue_existed=false
+          [[ -z "$canonical" ]] || issue_existed=true
           {
             echo 'Upstream sync did not consume the observed update because automation failed.'
             echo
@@ -364,8 +455,13 @@ jobs:
             echo
             echo 'Inspect the failed job and re-run `Upstream Sync`. No immutable production tag was moved.'
           } >/tmp/upstream-workflow-failure.md
-          if [[ -n "$canonical" ]]; then
-            gh issue comment "$canonical" --repo "$GITHUB_REPOSITORY" --body "A sync job failed in [run ${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) (discover=\`${DISCOVER_RESULT}\`, validate=\`${VALIDATE_RESULT}\`, finalize=\`${FINALIZE_RESULT}\`). The detailed canonical diagnostics above were preserved."
-          else
+          if [[ "$issue_existed" == false ]]; then
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$TRACKING_ISSUE_TITLE" --body-file /tmp/upstream-workflow-failure.md
+          fi
+          # Re-list after a possible create so every failure path converges on one issue.
+          canonical="$(canonical_issue)"
+          if [[ "$issue_existed" == false ]]; then
+            gh issue edit "$canonical" --repo "$GITHUB_REPOSITORY" --body-file /tmp/upstream-workflow-failure.md
+          else
+            gh issue comment "$canonical" --repo "$GITHUB_REPOSITORY" --body "A sync job failed in [run ${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) (discover=\`${DISCOVER_RESULT}\`, validate=\`${VALIDATE_RESULT}\`, finalize=\`${FINALIZE_RESULT}\`). The detailed canonical diagnostics above were preserved."
           fi
