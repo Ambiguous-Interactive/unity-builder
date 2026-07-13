@@ -206,14 +206,14 @@ jobs:
 
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git fetch origin "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
           git checkout -B "$SYNC_BRANCH" "$GITHUB_SHA"
           git merge --no-edit "$upstream_sha"
           printf '%s\n' "$upstream_sha" > UPSTREAM_COMMIT
           git add UPSTREAM_COMMIT
           git commit -m "chore: record upstream ${upstream_sha:0:12}"
           gh auth setup-git
-          git push --force-with-lease origin "$SYNC_BRANCH"
+          remote_sync_sha="$(git ls-remote origin "refs/heads/${SYNC_BRANCH}" | cut -f1)"
+          git push --force-with-lease="refs/heads/${SYNC_BRANCH}:${remote_sync_sha}" origin "$SYNC_BRANCH"
           candidate_sha="$(git rev-parse HEAD)"
           pr_number="$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq '.[0].number // empty')"
           if [[ -z "$pr_number" ]]; then
@@ -244,6 +244,7 @@ jobs:
           persist-credentials: false
       - name: Install trusted verifier parser
         run: |
+          rm -rf /tmp/upstream-verifier
           mkdir -p /tmp/upstream-verifier
           npm install --prefix /tmp/upstream-verifier --ignore-scripts --no-save --package-lock=false --no-audit --no-fund yaml@2.8.4
           cp _policy/scripts/verify-resource-cleanup-contract.mjs /tmp/upstream-verifier/verify.mjs
