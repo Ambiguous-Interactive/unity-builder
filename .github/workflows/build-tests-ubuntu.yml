@@ -96,19 +96,19 @@ jobs:
     steps:
       - name: Clear Space for Android Build
         if: matrix.targetPlatform == 'Android'
-        uses: jlumbroso/free-disk-space@v1.3.1
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
 
       ###########################
       #         Checkout        #
       ###########################
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           lfs: true
 
       ###########################
       #          Cache          #
       ###########################
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ matrix.projectPath }}/Library
           key: Library-${{ matrix.projectPath }}-ubuntu-${{ matrix.targetPlatform }}
@@ -131,9 +131,6 @@ jobs:
         uses: ./
         id: build-1
         continue-on-error: true
-        env:
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
           buildName: 'GameCI Test Build'
           projectPath: ${{ matrix.projectPath }}
@@ -154,9 +151,6 @@ jobs:
         id: build-2
         if: ${{ steps.build-1.outcome == 'failure' }}
         continue-on-error: true
-        env:
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
           buildName: 'GameCI Test Build'
           projectPath: ${{ matrix.projectPath }}
@@ -176,9 +170,6 @@ jobs:
         uses: ./
         id: build-3
         if: ${{ steps.build-2.outcome == 'failure' }}
-        env:
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
           buildName: 'GameCI Test Build'
           projectPath: ${{ matrix.projectPath }}
@@ -192,7 +183,7 @@ jobs:
       ###########################
       #          Upload         #
       ###########################
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: "Build ${{ matrix.targetPlatform }}${{ startsWith(matrix.buildProfile, 'Assets') && ' (via Build Profile)' || '' }} on Ubuntu (${{ matrix.unityVersion }}_il2cpp_${{ matrix.buildWithIl2cpp }}_params_${{ matrix.additionalParameters }})"
           path: build
