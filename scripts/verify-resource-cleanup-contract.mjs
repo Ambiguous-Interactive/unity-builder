@@ -1,9 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { parse } from 'yaml';
 
 const root = path.resolve(process.argv[2] || '.');
 const failures = [];
+const buildLockSha = 'f39ee38533b20592aa0fdf72b3e18d07c46325f3';
 
 function read(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
@@ -128,7 +129,7 @@ if (
   failures.push('RC014: Windows canary must order acquire, build, proof, and release');
 if (
   windowsStep('acquire-build-lock')?.uses !==
-    'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@7f892c7c585a962940f83c2f058e3cdcd3c673c5' ||
+    `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@${buildLockSha}` ||
   windowsStep('acquire-build-lock')?.with?.['require-resource-lifecycle'] !== 'true' ||
   windowsStep('acquire-build-lock')?.with?.['minimum-release-cooldown-seconds'] !== '360'
 )
@@ -145,7 +146,8 @@ if (
   cleanupProof?.run !== './scripts/classify-build-resource-proof.ps1' ||
   [1, 2, 3].some(
     (attempt) =>
-      cleanupProof?.env?.[`BUILD_${attempt}_OUTCOME`] !== `\${{ steps.build-${attempt}.outcome }}` ||
+      cleanupProof?.env?.[`BUILD_${attempt}_OUTCOME`] !==
+        `\${{ steps.build-${attempt}.outcome }}` ||
       cleanupProof?.env?.[`BUILD_${attempt}_RESOURCE_SAFE`] !==
         `\${{ steps.build-${attempt}.outputs.resourceSafe }}`,
   )
@@ -156,7 +158,9 @@ if (
   windowsVerify?.env?.LOCK_ACQUIRED !== '${{ steps.acquire-build-lock.outputs.acquired }}' ||
   !windowsVerify?.run?.includes("if ($env:LOCK_ACQUIRED -ne 'true')")
 )
-  failures.push('RC014: Windows canary must fail after release when lock ownership was not acquired');
+  failures.push(
+    'RC014: Windows canary must fail after release when lock ownership was not acquired',
+  );
 const expectedRunnerId =
   '${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}';
 const expectedHolderSuffix = '${{ github.job }}-${{ strategy.job-index }}';
@@ -170,12 +174,16 @@ if (
   failures.push('RC014: Windows acquire and release must use the same unique ephemeral identity');
 if (
   windowsRelease?.uses !==
-    'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@7f892c7c585a962940f83c2f058e3cdcd3c673c5' ||
+    `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@${buildLockSha}` ||
   windowsRelease?.if !== expectedReleaseCondition ||
-  windowsRelease?.with?.['resource-safe'] !==
-    "${{ steps.cleanup-proof.outputs.resource-safe || 'false' }}"
+  windowsRelease?.with?.['resource-cleanup-status'] !==
+    "${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'confirmed' || 'unknown' }}" ||
+  windowsRelease?.with?.['resource-health'] !== 'healthy' ||
+  windowsRelease?.with?.['resource-reason'] !==
+    "${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'cleanup-confirmed' || 'return-missing-positive-evidence' }}" ||
+  Object.hasOwn(windowsRelease?.with || {}, 'resource-safe')
 )
-  failures.push('RC014: Windows release must fail closed from the owning-container proof');
+  failures.push('RC014: Windows release must report typed schema-5 cleanup evidence');
 
 for (const [platform, file, jobName] of [
   ['macOS', '.github/workflows/build-tests-mac.yml', 'buildForAllPlatformsMacOS'],
@@ -191,10 +199,41 @@ for (const [platform, file, jobName] of [
     failures.push('RC014: paid-license macOS builds must stay disabled in the fork');
   if (platform === 'Ubuntu' && JSON.stringify(workflow).includes('UNITY_SERIAL'))
     failures.push('RC014: Ubuntu Personal-license workflow must not join the paid serial pool');
+  if (platform === 'Ubuntu' && JSON.stringify(workflow).includes('secrets.UNITY_'))
+    failures.push(
+      'RC014: Ubuntu Personal-license workflow must not receive organization Unity secrets',
+    );
+}
+
+const orchestratorWorkflow = read('.github/workflows/validate-orchestrator-integration.yml');
+if (orchestratorWorkflow.includes('secrets.UNITY_'))
+  failures.push('RC015: orchestrator integration tests must use synthetic Unity credentials');
+if (existsSync(path.join(root, '.github/workflows/sync-secrets.yml')))
+  failures.push('RC016: cross-repository secret synchronization must remain removed');
+
+for (const fileName of readdirSync(path.join(root, '.github/workflows'))) {
+  if (!fileName.endsWith('.yml') && !fileName.endsWith('.yaml')) continue;
+  const workflow = parse(read(`.github/workflows/${fileName}`));
+  const pending = [workflow];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    if (!value || typeof value !== 'object') continue;
+    if (
+      typeof value.uses === 'string' &&
+      !value.uses.startsWith('./') &&
+      !/@[0-9a-f]{40}$/.test(value.uses)
+    )
+      failures.push(`RC017: ${fileName} has mutable action reference ${value.uses}`);
+    pending.push(...Object.values(value));
+  }
 }
 
 if (failures.length) {
   console.error(failures.join('\n'));
   process.exit(1);
 }
-console.log('Resource cleanup contract verified (RC001-RC014).');
+console.log('Resource cleanup contract verified (RC001-RC017).');

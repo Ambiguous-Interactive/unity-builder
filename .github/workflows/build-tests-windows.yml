@@ -9,7 +9,7 @@ jobs:
     name: Resource cleanup proof contract
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - shell: pwsh
         run: ./scripts/test-windows-resource-proof.ps1
 
@@ -50,14 +50,14 @@ jobs:
       ###########################
       #         Checkout        #
       ###########################
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           lfs: true
 
       ###########################
       #          Cache          #
       ###########################
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ matrix.projectPath }}/Library
           key: Library-${{ matrix.projectPath }}-windows-${{ matrix.targetPlatform }}
@@ -103,8 +103,8 @@ jobs:
       - name: Acquire organization Unity lock
         id: acquire-build-lock
         timeout-minutes: 45
-        # ambiguous-organization-build-lock v1.5.0
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@7f892c7c585a962940f83c2f058e3cdcd3c673c5
+        # Organization authorization and schema-5 account health support.
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@f39ee38533b20592aa0fdf72b3e18d07c46325f3
         with:
           lock-name: wallstop-organization-builds
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
@@ -212,14 +212,16 @@ jobs:
       - name: Release organization Unity lock
         if: ${{ always() && (steps.acquire-build-lock.outcome == 'success' || steps.acquire-build-lock.outcome == 'failure' || steps.acquire-build-lock.outcome == 'cancelled') }}
         timeout-minutes: 5
-        # ambiguous-organization-build-lock v1.5.0
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@7f892c7c585a962940f83c2f058e3cdcd3c673c5
+        # Organization authorization and schema-5 account health support.
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@f39ee38533b20592aa0fdf72b3e18d07c46325f3
         with:
           lock-name: wallstop-organization-builds
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
           runner-id: ${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}
           holder-id-suffix: ${{ github.job }}-${{ strategy.job-index }}
-          resource-safe: ${{ steps.cleanup-proof.outputs.resource-safe || 'false' }}
+          resource-cleanup-status: ${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'confirmed' || 'unknown' }}
+          resource-health: healthy
+          resource-reason: ${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'cleanup-confirmed' || 'return-missing-positive-evidence' }}
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
           BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}
@@ -232,7 +234,7 @@ jobs:
           BUILD_1_OUTCOME: ${{ steps.build-1.outcome }}
           BUILD_2_OUTCOME: ${{ steps.build-2.outcome }}
           BUILD_3_OUTCOME: ${{ steps.build-3.outcome }}
-          CLEANUP_RESOURCE_SAFE: ${{ steps.cleanup-proof.outputs.resource-safe }}
+          CLEANUP_RESOURCE_SAFE: ${{ steps.cleanup-proof.outputs['resource-safe'] }}
         run: |
           if ($env:LOCK_ACQUIRED -ne 'true') {
             throw 'Windows canary did not acquire the lifecycle-aware organization lock.'
@@ -252,7 +254,7 @@ jobs:
       ###########################
       #          Upload         #
       ###########################
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name:
             Build ${{ matrix.targetPlatform }} on Windows (${{ matrix.unityVersion }})${{ matrix.enableGpu && ' With
