@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 3
     steps:
       - name: Require an online Windows Unity runner
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/check-unity-runner-availability@a8d43dd87a938f1b3417fd8a9310354bf38e2fd1 # v1.8.2
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/check-unity-runner-availability@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
         with:
           reader-app-id: ${{ secrets.BUILD_LOCK_READER_APP_ID }}
           reader-app-private-key: ${{ secrets.BUILD_LOCK_READER_APP_PRIVATE_KEY }}
@@ -118,7 +118,7 @@ jobs:
         id: acquire-build-lock
         timeout-minutes: 45
         # Organization authorization and schema-5 account health support.
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@a8d43dd87a938f1b3417fd8a9310354bf38e2fd1 # v1.8.2
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
         with:
           lock-name: wallstop-organization-builds
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
@@ -226,7 +226,7 @@ jobs:
         if: ${{ always() && (steps.acquire-build-lock.outcome == 'success' || steps.acquire-build-lock.outcome == 'failure' || steps.acquire-build-lock.outcome == 'cancelled') }}
         timeout-minutes: 5
         # Organization authorization and schema-5 account health support.
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@a8d43dd87a938f1b3417fd8a9310354bf38e2fd1 # v1.8.2
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
         with:
           lock-name: wallstop-organization-builds
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
