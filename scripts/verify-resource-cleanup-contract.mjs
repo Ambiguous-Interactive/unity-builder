@@ -4,7 +4,7 @@ import { parse } from 'yaml';
 
 const root = path.resolve(process.argv[2] || '.');
 const failures = [];
-const buildLockSha = 'f39ee38533b20592aa0fdf72b3e18d07c46325f3';
+const buildLockSha = 'a8d43dd87a938f1b3417fd8a9310354bf38e2fd1';
 
 function read(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
@@ -89,6 +89,7 @@ requireText('RC012', 'dist/index.js', 'UNITY_BUILDER_RESOURCE_PROOF_NONCE');
 requireText('RC013', 'dist/index.js', 'resourceSafe');
 
 const windowsWorkflow = parse(read('.github/workflows/build-tests-windows.yml'));
+const windowsPreflight = windowsWorkflow.jobs?.['runner-preflight'];
 const windowsJob = windowsWorkflow.jobs?.buildForAllPlatformsWindows;
 const windowsSteps = windowsJob?.steps || [];
 const windowsStepIndex = (id) => windowsSteps.findIndex((step) => step.id === id);
@@ -100,6 +101,24 @@ if (
   failures.push('RC014: Windows workflow must retain push static checks and manual canaries');
 if (windowsJob?.if !== "github.event_name == 'workflow_dispatch'")
   failures.push('RC014: licensed Windows matrix must be manual-only');
+if (
+  windowsPreflight?.if !== "github.event_name == 'workflow_dispatch'" ||
+  windowsPreflight?.['runs-on'] !== 'ubuntu-latest' ||
+  windowsPreflight?.steps?.[0]?.uses !==
+    `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/check-unity-runner-availability@${buildLockSha}` ||
+  windowsPreflight?.steps?.[0]?.with?.['reader-app-id'] !==
+    '${{ secrets.BUILD_LOCK_READER_APP_ID }}' ||
+  windowsPreflight?.steps?.[0]?.with?.['reader-app-private-key'] !==
+    '${{ secrets.BUILD_LOCK_READER_APP_PRIVATE_KEY }}' ||
+  windowsPreflight?.steps?.[0]?.with?.['required-label-sets'] !==
+    '[["self-hosted","Windows","RAM-64GB"]]'
+)
+  failures.push('RC014: Windows canary must fail closed through the reader-App preflight');
+if (
+  windowsJob?.needs !== 'runner-preflight' ||
+  JSON.stringify(windowsJob?.['runs-on']) !== JSON.stringify(['self-hosted', 'Windows', 'RAM-64GB'])
+)
+  failures.push('RC014: licensed Windows matrix must run only on the preflighted fleet');
 if (windowsJob?.strategy?.['max-parallel'] !== 1)
   failures.push('RC014: licensed Windows matrix must admit only one runner at a time');
 const expectedBuildConditions = [
@@ -184,6 +203,23 @@ if (
   Object.hasOwn(windowsRelease?.with || {}, 'resource-safe')
 )
   failures.push('RC014: Windows release must report typed schema-5 cleanup evidence');
+
+const windowsAggregate = windowsWorkflow.jobs?.['windows-license-ci'];
+if (
+  windowsAggregate?.if !== '${{ always() }}' ||
+  JSON.stringify(windowsAggregate?.needs) !==
+    JSON.stringify([
+      'resource-cleanup-proof-contract',
+      'runner-preflight',
+      'buildForAllPlatformsWindows',
+    ]) ||
+  windowsAggregate?.steps?.[0]?.env?.PREFLIGHT_RESULT !== '${{ needs.runner-preflight.result }}' ||
+  windowsAggregate?.steps?.[0]?.env?.UNITY_RESULT !==
+    '${{ needs.buildForAllPlatformsWindows.result }}' ||
+  !windowsAggregate?.steps?.[0]?.run?.includes('PREFLIGHT_RESULT') ||
+  !windowsAggregate?.steps?.[0]?.run?.includes('UNITY_RESULT')
+)
+  failures.push('RC014: Windows canary aggregate must reject unavailable or skipped licensed work');
 
 for (const [platform, file, jobName] of [
   ['macOS', '.github/workflows/build-tests-mac.yml', 'buildForAllPlatformsMacOS'],

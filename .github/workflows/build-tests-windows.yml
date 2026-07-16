@@ -13,10 +13,24 @@ jobs:
       - shell: pwsh
         run: ./scripts/test-windows-resource-proof.ps1
 
+  runner-preflight:
+    name: Self-hosted runner access preflight
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Require an online Windows Unity runner
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/check-unity-runner-availability@a8d43dd87a938f1b3417fd8a9310354bf38e2fd1 # v1.8.2
+        with:
+          reader-app-id: ${{ secrets.BUILD_LOCK_READER_APP_ID }}
+          reader-app-private-key: ${{ secrets.BUILD_LOCK_READER_APP_PRIVATE_KEY }}
+          required-label-sets: '[["self-hosted","Windows","RAM-64GB"]]'
+
   buildForAllPlatformsWindows:
     name: ${{ matrix.targetPlatform }} on ${{ matrix.unityVersion }}
     if: github.event_name == 'workflow_dispatch'
-    runs-on: windows-2022
+    needs: runner-preflight
+    runs-on: [self-hosted, Windows, RAM-64GB]
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -104,13 +118,12 @@ jobs:
         id: acquire-build-lock
         timeout-minutes: 45
         # Organization authorization and schema-5 account health support.
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@f39ee38533b20592aa0fdf72b3e18d07c46325f3
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@a8d43dd87a938f1b3417fd8a9310354bf38e2fd1 # v1.8.2
         with:
           lock-name: wallstop-organization-builds
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
-          # GitHub-hosted runner names are not stable physical-machine IDs.
-          # A per-job identity prevents a future ephemeral VM from reclaiming
-          # a quarantine created by this one.
+          # Each Docker activation is a distinct cleanup identity even when
+          # multiple matrix legs reuse the same self-hosted machine.
           runner-id: ${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}
           holder-id-suffix: ${{ github.job }}-${{ strategy.job-index }}
           timeout-minutes: '40'
@@ -213,7 +226,7 @@ jobs:
         if: ${{ always() && (steps.acquire-build-lock.outcome == 'success' || steps.acquire-build-lock.outcome == 'failure' || steps.acquire-build-lock.outcome == 'cancelled') }}
         timeout-minutes: 5
         # Organization authorization and schema-5 account health support.
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@f39ee38533b20592aa0fdf72b3e18d07c46325f3
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@a8d43dd87a938f1b3417fd8a9310354bf38e2fd1 # v1.8.2
         with:
           lock-name: wallstop-organization-builds
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
@@ -261,3 +274,37 @@ jobs:
             GPU' || '' }}${{ matrix.buildProfile && '  With Build Profile' || '' }}
           path: build
           retention-days: 14
+
+  windows-license-ci:
+    name: Windows license CI
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    needs:
+      - resource-cleanup-proof-contract
+      - runner-preflight
+      - buildForAllPlatformsWindows
+    steps:
+      - name: Require requested licensed validation
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PROOF_RESULT: ${{ needs.resource-cleanup-proof-contract.result }}
+          PREFLIGHT_RESULT: ${{ needs.runner-preflight.result }}
+          UNITY_RESULT: ${{ needs.buildForAllPlatformsWindows.result }}
+        run: |
+          set -euo pipefail
+          if [ "${PROOF_RESULT}" != "success" ]; then
+            echo "::error::Resource cleanup proof contract finished with ${PROOF_RESULT}."
+            exit 1
+          fi
+          if [ "${EVENT_NAME}" != "workflow_dispatch" ]; then
+            exit 0
+          fi
+          if [ "${PREFLIGHT_RESULT}" != "success" ]; then
+            echo "::error::Unity runner preflight finished with ${PREFLIGHT_RESULT}."
+            exit 1
+          fi
+          if [ "${UNITY_RESULT}" != "success" ]; then
+            echo "::error::Licensed Unity validation finished with ${UNITY_RESULT}."
+            exit 1
+          fi
