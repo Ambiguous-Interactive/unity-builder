@@ -4,7 +4,7 @@ import { parse } from 'yaml';
 
 const root = path.resolve(process.argv[2] || '.');
 const failures = [];
-const buildLockSha = 'a8d43dd87a938f1b3417fd8a9310354bf38e2fd1';
+const buildLockSha = '59a2fa98224569e5a697f271a3ac4b866c53ac2c';
 
 function read(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
