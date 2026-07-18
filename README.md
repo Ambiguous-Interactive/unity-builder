@@ -53,3 +53,5 @@ You can support us at [OpenCollective](https://opencollective.com/game-ci).
 This repository is [MIT](./LICENSE) licensed.
 
 This includes all contributions from the community.
+
+<!-- Fork pull-request coverage authentication canary. -->
