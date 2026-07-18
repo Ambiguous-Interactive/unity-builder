@@ -18,6 +18,8 @@ jobs:
   tests:
     name: Tests
     runs-on: ubuntu-latest
+    outputs:
+      coverage-artifact-id: ${{ steps.coverage-artifact.outputs.artifact-id }}
     permissions:
       contents: read
     steps:
@@ -52,6 +54,7 @@ jobs:
       - run: node scripts/verify-resource-cleanup-contract.mjs .
       - run: yarn test:ci --coverage
       - name: Preserve coverage for isolated upload
+        id: coverage-artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
@@ -66,10 +69,11 @@ jobs:
   upload-trusted-coverage:
     name: Upload trusted coverage
     if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      always() && needs.tests.outputs.coverage-artifact-id != '' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]')
+      github.event.pull_request.user.login != 'dependabot[bot]'))
     needs: tests
     runs-on: ubuntu-latest
     permissions:
@@ -91,6 +95,7 @@ jobs:
   upload-tokenless-pr-coverage:
     name: Upload fork and Dependabot coverage without a token
     if: >-
+      always() && needs.tests.outputs.coverage-artifact-id != '' &&
       github.event_name == 'pull_request' &&
       (github.event.pull_request.head.repo.full_name != github.repository ||
       github.event.pull_request.user.login == 'dependabot[bot]')

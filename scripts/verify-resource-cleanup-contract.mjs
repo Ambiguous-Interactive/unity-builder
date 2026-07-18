@@ -253,15 +253,26 @@ if (existsSync(path.join(root, '.github/workflows/sync-secrets.yml')))
 
 const integrityWorkflow = parse(read('.github/workflows/integrity-check.yml'));
 const integrityTests = integrityWorkflow.jobs?.tests;
-const coverageArtifactStep = integrityTests?.steps?.find(
+const integrityTestSteps = integrityTests?.steps || [];
+const coverageGenerationStepIndex = integrityTestSteps.findIndex(
+  (step) => step.run === 'yarn test:ci --coverage',
+);
+const coverageArtifactStepIndex = integrityTestSteps.findIndex(
   (step) => step.name === 'Preserve coverage for isolated upload',
 );
+const distVerificationStepIndex = integrityTestSteps.findIndex(
+  (step) => step.name === 'Verify generated distribution',
+);
+const coverageGenerationStep = integrityTestSteps[coverageGenerationStepIndex];
+const coverageArtifactStep = integrityTestSteps[coverageArtifactStepIndex];
+const hasExplicitConditionOrFailureOverride = (step) =>
+  Object.hasOwn(step || {}, 'if') || Object.hasOwn(step || {}, 'continue-on-error');
 const trustedCoverageJob = integrityWorkflow.jobs?.['upload-trusted-coverage'];
 const tokenlessPrCoverageJob = integrityWorkflow.jobs?.['upload-tokenless-pr-coverage'];
 const trustedCoverageCondition =
-  "(github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')";
+  "always() && needs.tests.outputs.coverage-artifact-id != '' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))";
 const tokenlessPrCoverageCondition =
-  "github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')";
+  "always() && needs.tests.outputs.coverage-artifact-id != '' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')";
 const expectedTrustedSteps = [
   {
     name: 'Download coverage',
@@ -300,7 +311,15 @@ if (
   integrityTests?.permissions?.contents !== 'read' ||
   Object.keys(integrityTests?.permissions || {}).length !== 1 ||
   Object.hasOwn(integrityTests?.permissions || {}, 'id-token') ||
-  (integrityTests?.steps || []).some((step) => String(step.uses || '').startsWith('codecov/')) ||
+  integrityTestSteps.some((step) => String(step.uses || '').startsWith('codecov/')) ||
+  integrityTests?.outputs?.['coverage-artifact-id'] !==
+    '${{ steps.coverage-artifact.outputs.artifact-id }}' ||
+  coverageGenerationStepIndex < 0 ||
+  coverageArtifactStepIndex <= coverageGenerationStepIndex ||
+  distVerificationStepIndex <= coverageArtifactStepIndex ||
+  hasExplicitConditionOrFailureOverride(coverageGenerationStep) ||
+  hasExplicitConditionOrFailureOverride(coverageArtifactStep) ||
+  coverageArtifactStep?.id !== 'coverage-artifact' ||
   coverageArtifactStep?.uses !==
     'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' ||
   coverageArtifactStep?.with?.name !== 'coverage-report' ||
