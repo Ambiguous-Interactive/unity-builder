@@ -12,6 +12,7 @@
     "test": "node scripts/ensure-husky.mjs && vitest run",
     "test:watch": "vitest",
     "test:ci": "vitest run",
+    "test:workflow-policy": "node --test scripts/workflow-credential-policy.test.mjs",
     "coverage": "vitest run --coverage",
     "lint": "yarn oxlint --report-unused-disable-directives",
     "format": "oxfmt --write",

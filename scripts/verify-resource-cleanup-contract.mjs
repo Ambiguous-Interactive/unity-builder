@@ -1,6 +1,10 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { parse } from 'yaml';
+import {
+  findCredentialShapedEnvLiterals,
+  renderCredentialFinding,
+} from './workflow-credential-policy.mjs';
 
 const root = path.resolve(process.argv[2] || '.');
 const failures = [];
@@ -247,6 +251,100 @@ if (orchestratorWorkflow.includes('secrets.UNITY_'))
 if (existsSync(path.join(root, '.github/workflows/sync-secrets.yml')))
   failures.push('RC016: cross-repository secret synchronization must remain removed');
 
+const integrityWorkflow = parse(read('.github/workflows/integrity-check.yml'));
+const integrityTests = integrityWorkflow.jobs?.tests;
+const coverageArtifactStep = integrityTests?.steps?.find(
+  (step) => step.name === 'Preserve coverage for isolated upload',
+);
+const trustedCoverageJob = integrityWorkflow.jobs?.['upload-trusted-coverage'];
+const tokenlessPrCoverageJob = integrityWorkflow.jobs?.['upload-tokenless-pr-coverage'];
+const trustedCoverageCondition =
+  "(github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')";
+const tokenlessPrCoverageCondition =
+  "github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')";
+const expectedTrustedSteps = [
+  {
+    name: 'Download coverage',
+    uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c',
+    with: { name: 'coverage-report', path: 'coverage' },
+  },
+  {
+    name: 'Upload coverage to Codecov with OIDC',
+    uses: 'codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f',
+    with: {
+      disable_search: true,
+      fail_ci_if_error: true,
+      files: './coverage/lcov.info',
+      use_oidc: true,
+    },
+  },
+];
+const expectedPrSteps = [
+  expectedTrustedSteps[0],
+  {
+    name: 'Upload unprotected fork or Dependabot coverage without a token',
+    uses: 'codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f',
+    with: {
+      disable_search: true,
+      fail_ci_if_error: true,
+      files: './coverage/lcov.info',
+      override_branch:
+        'pr${{ github.event.pull_request.number }}:${{ github.event.pull_request.head.ref }}',
+      use_oidc: false,
+    },
+  },
+];
+const uploadJobUsesCheckout = (job) =>
+  (job?.steps || []).some((step) => String(step.uses || '').startsWith('actions/checkout@'));
+if (
+  integrityTests?.permissions?.contents !== 'read' ||
+  Object.keys(integrityTests?.permissions || {}).length !== 1 ||
+  Object.hasOwn(integrityTests?.permissions || {}, 'id-token') ||
+  (integrityTests?.steps || []).some((step) => String(step.uses || '').startsWith('codecov/')) ||
+  coverageArtifactStep?.uses !==
+    'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' ||
+  coverageArtifactStep?.with?.name !== 'coverage-report' ||
+  coverageArtifactStep?.with?.path !== './coverage/lcov.info' ||
+  coverageArtifactStep?.with?.['if-no-files-found'] !== 'error' ||
+  coverageArtifactStep?.with?.['retention-days'] !== 1 ||
+  trustedCoverageJob?.if !== trustedCoverageCondition ||
+  trustedCoverageJob?.needs !== 'tests' ||
+  trustedCoverageJob?.permissions?.['id-token'] !== 'write' ||
+  Object.keys(trustedCoverageJob?.permissions || {}).length !== 1 ||
+  uploadJobUsesCheckout(trustedCoverageJob) ||
+  JSON.stringify(trustedCoverageJob?.steps) !== JSON.stringify(expectedTrustedSteps) ||
+  tokenlessPrCoverageJob?.if !== tokenlessPrCoverageCondition ||
+  tokenlessPrCoverageJob?.needs !== 'tests' ||
+  tokenlessPrCoverageJob?.permissions?.contents !== 'read' ||
+  Object.keys(tokenlessPrCoverageJob?.permissions || {}).length !== 1 ||
+  Object.hasOwn(tokenlessPrCoverageJob?.permissions || {}, 'id-token') ||
+  uploadJobUsesCheckout(tokenlessPrCoverageJob) ||
+  JSON.stringify(tokenlessPrCoverageJob?.steps) !== JSON.stringify(expectedPrSteps) ||
+  JSON.stringify(integrityWorkflow).includes('secrets.CODECOV')
+)
+  failures.push(
+    'RC019: coverage must cross an artifact boundary into exact isolated pinned OIDC and fork/Dependabot tokenless upload jobs',
+  );
+
+const pendingWorkflowDirectories = [path.join(root, '.github')];
+while (pendingWorkflowDirectories.length > 0) {
+  const directory = pendingWorkflowDirectories.pop();
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const absolute = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      pendingWorkflowDirectories.push(absolute);
+      continue;
+    }
+    if (!entry.isFile() || (!entry.name.endsWith('.yml') && !entry.name.endsWith('.yaml')))
+      continue;
+    const fileName = path.relative(path.join(root, '.github'), absolute).replaceAll('\\', '/');
+    const workflow = parse(read(path.relative(root, absolute)));
+    for (const finding of findCredentialShapedEnvLiterals(workflow, fileName)) {
+      failures.push(`RC018: ${renderCredentialFinding(finding)}`);
+    }
+  }
+}
+
 for (const fileName of readdirSync(path.join(root, '.github/workflows'))) {
   if (!fileName.endsWith('.yml') && !fileName.endsWith('.yaml')) continue;
   const workflow = parse(read(`.github/workflows/${fileName}`));
@@ -272,4 +370,4 @@ if (failures.length) {
   console.error(failures.join('\n'));
   process.exit(1);
 }
-console.log('Resource cleanup contract verified (RC001-RC017).');
+console.log('Resource cleanup contract verified (RC001-RC019).');
