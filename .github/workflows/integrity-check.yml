@@ -15,6 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Same-run artifact actions use the workflow artifact runtime; keep GITHUB_TOKEN scopes minimal.
   tests:
     name: Tests
     runs-on: ubuntu-latest
