@@ -11,6 +11,8 @@ import {
 const root = path.resolve(process.argv[2] || '.');
 const failures = [];
 const buildLockSha = '59a2fa98224569e5a697f271a3ac4b866c53ac2c';
+const runBashContractTests =
+  process.platform !== 'win32' || process.env.RUN_BASH_CONTRACT_TESTS === 'true';
 
 function read(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
@@ -192,7 +194,7 @@ if (
   failures.push(
     'RC014: smoke must be one complete leg and full dispatch must preserve 15 complete legs',
   );
-if (process.platform !== 'win32' && matrixScript) {
+if (runBashContractTests && matrixScript) {
   const selectorCases = [
     ['pull request', 'pull_request', '', 0, 1],
     ['push', 'push', '', 0, 1],
@@ -418,25 +420,28 @@ if (
       trustedPr +
       ') }}' ||
   !aggregateStep?.run?.includes('PREFLIGHT_REQUIRED') ||
-  !aggregateStep?.run?.includes('LICENSED_REQUIRED')
+  !aggregateStep?.run?.includes('LICENSED_REQUIRED') ||
+  !aggregateStep?.run?.includes('HEAD_RESULT')
 )
   failures.push('RC014: Windows canary aggregate must reject unavailable or skipped licensed work');
 
-if (process.platform !== 'win32' && aggregateStep?.run) {
+if (runBashContractTests && aggregateStep?.run) {
   const aggregateCases = [
-    ['trusted PR success', 'true', 'true', 'success', 'success', 0],
-    ['preflight-only success', 'true', 'false', 'success', 'skipped', 0],
-    ['fork, Dependabot, or push', 'false', 'false', 'skipped', 'skipped', 0],
-    ['runner unavailable', 'true', 'true', 'failure', 'skipped', 1],
-    ['licensed work skipped', 'true', 'true', 'success', 'skipped', 1],
-    ['licensed work failed', 'true', 'true', 'success', 'failure', 1],
-    ['licensed work cancelled', 'true', 'true', 'success', 'cancelled', 1],
-    ['unexpected unlicensed work', 'false', 'false', 'skipped', 'success', 1],
+    ['trusted PR success', 'true', 'true', 'success', 'success', 'success', 0],
+    ['preflight-only success', 'true', 'false', 'success', 'success', 'skipped', 0],
+    ['fork, Dependabot, or push', 'false', 'false', 'success', 'skipped', 'skipped', 0],
+    ['head validation failed', 'true', 'true', 'failure', 'success', 'success', 1],
+    ['runner unavailable', 'true', 'true', 'success', 'failure', 'skipped', 1],
+    ['licensed work skipped', 'true', 'true', 'success', 'success', 'skipped', 1],
+    ['licensed work failed', 'true', 'true', 'success', 'success', 'failure', 1],
+    ['licensed work cancelled', 'true', 'true', 'success', 'success', 'cancelled', 1],
+    ['unexpected unlicensed work', 'false', 'false', 'success', 'skipped', 'success', 1],
   ];
   for (const [
     name,
     preflightRequired,
     licensedRequired,
+    head,
     preflight,
     unity,
     expected,
@@ -449,6 +454,7 @@ if (process.platform !== 'win32' && aggregateStep?.run) {
           ...process.env,
           PROOF_RESULT: 'success',
           MATRIX_RESULT: 'success',
+          HEAD_RESULT: head,
           PREFLIGHT_REQUIRED: preflightRequired,
           LICENSED_REQUIRED: licensedRequired,
           PREFLIGHT_RESULT: preflight,
