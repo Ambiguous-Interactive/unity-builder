@@ -37,28 +37,15 @@ describe('Versioning', () => {
   });
 
   describe('grepCompatibleInputVersionRegex', () => {
-    // eslint-disable-next-line unicorn/consistent-function-scoping
-    const matchInputUsingGrep = async (input: string) => {
-      const output = await System.run('sh', undefined, {
-        input: Buffer.from(
-          `echo '${input}' | grep -E '${Versioning.grepCompatibleInputVersionRegex}'`,
-        ),
-        silent: true,
-      });
+    const inputVersionRegex = new RegExp(Versioning.grepCompatibleInputVersionRegex);
 
-      return output.trim();
-    };
-
-    it.concurrent.each(validVersionTagInputs)(`accepts valid tag input '%s'`, async (input) => {
-      expect(await matchInputUsingGrep(input)).toStrictEqual(input);
+    it.concurrent.each(validVersionTagInputs)(`accepts valid tag input '%s'`, (input) => {
+      expect(inputVersionRegex.test(input)).toBeTruthy();
     });
 
-    it.concurrent.each(invalidVersionTagInputs)(
-      `rejects non-version tag input '%s'`,
-      async (input) => {
-        await expect(async () => matchInputUsingGrep(input)).rejects.toThrowError(/^Failed to run/);
-      },
-    );
+    it.concurrent.each(invalidVersionTagInputs)(`rejects non-version tag input '%s'`, (input) => {
+      expect(inputVersionRegex.test(input)).toBeFalsy();
+    });
   });
 
   describe('branch', () => {
@@ -118,7 +105,7 @@ describe('Versioning', () => {
   });
 
   describe('logging git diff', () => {
-    it('calls git diff', async () => {
+    it('logs at most maxDiffLines without requiring a shell', async () => {
       // allowDirtyBuild: true
       vi.spyOn(core, 'getInput').mockReturnValue('true');
       vi.spyOn(Versioning, 'isShallow').mockResolvedValue(true);
@@ -132,12 +119,18 @@ describe('Versioning', () => {
         hash: '75822BCAF',
       });
       const logDiffSpy = vi.spyOn(Versioning, 'logDiff');
-      const gitSpy = vi.spyOn(System, 'run').mockResolvedValue('');
+      const diff = Array.from(
+        { length: Versioning.maxDiffLines + 5 },
+        (_, index) => `line ${index}`,
+      );
+      const gitSpy = vi.spyOn(Versioning, 'git').mockResolvedValue(diff.join('\n'));
+      const infoSpy = vi.spyOn(core, 'info').mockImplementation(() => {});
 
       await Versioning.generateSemanticVersion();
 
       expect(logDiffSpy).toHaveBeenCalledTimes(1);
-      expect(gitSpy).toHaveBeenCalledTimes(1);
+      expect(gitSpy).toHaveBeenCalledWith(['--no-pager', 'diff']);
+      expect(infoSpy).toHaveBeenCalledWith(diff.slice(0, Versioning.maxDiffLines).join('\n'));
 
       // Todo - this no longer works since typescript
       // const issuedCommand = System.run.mock.calls[0][2].input.toString();
@@ -356,14 +349,14 @@ describe('Versioning', () => {
   });
 
   describe('hasAnyVersionTags', () => {
-    it('returns false when the command returns 0', async () => {
-      const runOutput = '0';
+    it('returns false when no matching tags are present', async () => {
+      const runOutput = 'latest\nrelease-candidate\n';
       vi.spyOn(System, 'run').mockResolvedValue(runOutput);
       await expect(Versioning.hasAnyVersionTags()).resolves.toStrictEqual(false);
     });
 
-    it('returns true when the command returns >= 0', async () => {
-      const runOutput = '9';
+    it('returns true when a matching tag is present', async () => {
+      const runOutput = 'latest\nv1.2.3\nrelease-candidate\n';
       vi.spyOn(System, 'run').mockResolvedValue(runOutput);
       await expect(Versioning.hasAnyVersionTags()).resolves.toStrictEqual(true);
     });
