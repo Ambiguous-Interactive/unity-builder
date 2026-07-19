@@ -473,6 +473,15 @@ if (process.platform !== 'win32' && aggregateStep?.run) {
   }
 }
 
+const upstreamSync = read('.github/workflows/upstream-sync.yml');
+const verifierCopies =
+  upstreamSync.match(/cp .*verify-resource-cleanup-contract\.mjs .*verify\.mjs/g) || [];
+const policyCopies =
+  upstreamSync.match(/cp .*workflow-credential-policy\.mjs .*workflow-credential-policy\.mjs/g) ||
+  [];
+if (verifierCopies.length !== 2 || policyCopies.length !== verifierCopies.length)
+  failures.push('RC014: every isolated upstream verifier must copy its imported policy module');
+
 for (const [platform, file, jobName] of [
   ['macOS', '.github/workflows/build-tests-mac.yml', 'buildForAllPlatformsMacOS'],
   ['Ubuntu', '.github/workflows/build-tests-ubuntu.yml', 'buildForAllPlatformsUbuntu'],

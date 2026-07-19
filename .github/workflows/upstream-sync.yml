@@ -76,6 +76,7 @@ jobs:
             mkdir -p /tmp/upstream-verifier
             npm install --prefix /tmp/upstream-verifier --ignore-scripts --no-save --package-lock=false --no-audit --no-fund yaml@2.8.4
             cp scripts/verify-resource-cleanup-contract.mjs /tmp/upstream-verifier/verify.mjs
+            cp scripts/workflow-credential-policy.mjs /tmp/upstream-verifier/workflow-credential-policy.mjs
             node /tmp/upstream-verifier/verify.mjs .
           }
           report_error() {
@@ -248,6 +249,7 @@ jobs:
           mkdir -p /tmp/upstream-verifier
           npm install --prefix /tmp/upstream-verifier --ignore-scripts --no-save --package-lock=false --no-audit --no-fund yaml@2.8.4
           cp _policy/scripts/verify-resource-cleanup-contract.mjs /tmp/upstream-verifier/verify.mjs
+          cp _policy/scripts/workflow-credential-policy.mjs /tmp/upstream-verifier/workflow-credential-policy.mjs
       - name: Verify lifecycle contract with trusted policy
         run: node /tmp/upstream-verifier/verify.mjs _candidate
       - name: Install package manager and dependencies
