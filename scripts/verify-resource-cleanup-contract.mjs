@@ -365,10 +365,12 @@ if (
 )
   failures.push('RC014: FIFO admission must revalidate the exact PR head before activation');
 if (
-  cleanupProof?.if !== "${{ always() && steps.acquire-build-lock.outcome == 'success' }}" ||
+  cleanupProof?.if !== expectedReleaseCondition ||
   cleanupProof?.run !== './scripts/classify-build-resource-proof.ps1' ||
   cleanupProof?.env?.POST_ACQUIRE_HEAD_OUTCOME !==
     '${{ steps.current-pr-head-after-acquire.outcome }}' ||
+  cleanupProof?.env?.QUARANTINE_RECOVERED !==
+    "${{ steps.acquire-build-lock.outputs['quarantine-recovered'] }}" ||
   [1, 2, 3].some(
     (attempt) =>
       cleanupProof?.env?.[`BUILD_${attempt}_OUTCOME`] !==
@@ -377,15 +379,26 @@ if (
         `\${{ steps.build-${attempt}.outputs.resourceSafe }}`,
   )
 )
-  failures.push('RC014: cleanup classifier must inspect every attempted build under always()');
+  failures.push(
+    'RC014: cleanup classifier must run for every release-eligible acquire outcome and inspect every attempted build',
+  );
 if (
   windowsVerify?.if !== '${{ always() }}' ||
   windowsVerify?.env?.LOCK_ACQUIRED !== '${{ steps.acquire-build-lock.outputs.acquired }}' ||
+  windowsVerify?.env?.CLEANUP_RESOURCE_SAFE !==
+    "${{ steps.cleanup-proof.outputs['resource-safe'] }}" ||
+  windowsVerify?.env?.CLEANUP_RESOURCE_REASON !==
+    "${{ steps.cleanup-proof.outputs['resource-reason'] }}" ||
   !windowsVerify?.run?.includes("if ($env:LOCK_ACQUIRED -ne 'true')")
 )
   failures.push(
     'RC014: Windows canary must fail after release when lock ownership was not acquired',
   );
+if (
+  !windowsVerify?.run?.includes("$env:CLEANUP_RESOURCE_SAFE -ne 'true' -or") ||
+  !windowsVerify?.run?.includes("$env:CLEANUP_RESOURCE_REASON -ne 'cleanup-confirmed'")
+)
+  failures.push('RC014: Windows canary must require the exact confirmed cleanup proof tuple');
 const expectedRunnerId = '${{ runner.name }}';
 const expectedHolderSuffix = '${{ github.job }}-${{ strategy.job-index }}';
 if (
@@ -403,10 +416,10 @@ if (
     `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@${buildLockSha}` ||
   windowsRelease?.if !== expectedReleaseCondition ||
   windowsRelease?.with?.['resource-cleanup-status'] !==
-    "${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'confirmed' || 'unknown' }}" ||
+    "${{ (steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'confirmed') || 'unknown' }}" ||
   windowsRelease?.with?.['resource-health'] !== 'healthy' ||
   windowsRelease?.with?.['resource-reason'] !==
-    "${{ steps.cleanup-proof.outputs['resource-reason'] }}" ||
+    "${{ (steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'cleanup-confirmed') || (steps.cleanup-proof.outputs['resource-reason'] == 'return-missing-positive-evidence' && 'return-missing-positive-evidence') || 'cleanup-evidence-unknown' }}" ||
   Object.hasOwn(windowsRelease?.with || {}, 'resource-safe')
 )
   failures.push('RC014: Windows release must report typed schema-5 cleanup evidence');

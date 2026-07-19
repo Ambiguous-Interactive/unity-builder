@@ -300,7 +300,7 @@ jobs:
 
       - name: Classify activation-owning cleanup proof
         id: cleanup-proof
-        if: ${{ always() && steps.acquire-build-lock.outcome == 'success' }}
+        if: ${{ always() && (steps.acquire-build-lock.outcome == 'success' || steps.acquire-build-lock.outcome == 'failure' || steps.acquire-build-lock.outcome == 'cancelled') }}
         shell: pwsh
         env:
           BUILD_1_OUTCOME: ${{ steps.build-1.outcome }}
@@ -310,6 +310,7 @@ jobs:
           BUILD_3_OUTCOME: ${{ steps.build-3.outcome }}
           BUILD_3_RESOURCE_SAFE: ${{ steps.build-3.outputs.resourceSafe }}
           POST_ACQUIRE_HEAD_OUTCOME: ${{ steps.current-pr-head-after-acquire.outcome }}
+          QUARANTINE_RECOVERED: ${{ steps.acquire-build-lock.outputs['quarantine-recovered'] }}
         run: ./scripts/classify-build-resource-proof.ps1
 
       - name: Release organization Unity lock
@@ -322,9 +323,9 @@ jobs:
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
           runner-id: ${{ runner.name }}
           holder-id-suffix: ${{ github.job }}-${{ strategy.job-index }}
-          resource-cleanup-status: ${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'confirmed' || 'unknown' }}
+          resource-cleanup-status: ${{ (steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'confirmed') || 'unknown' }}
           resource-health: healthy
-          resource-reason: ${{ steps.cleanup-proof.outputs['resource-reason'] }}
+          resource-reason: ${{ (steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'cleanup-confirmed') || (steps.cleanup-proof.outputs['resource-reason'] == 'return-missing-positive-evidence' && 'return-missing-positive-evidence') || 'cleanup-evidence-unknown' }}
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
           BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}
@@ -338,6 +339,7 @@ jobs:
           BUILD_2_OUTCOME: ${{ steps.build-2.outcome }}
           BUILD_3_OUTCOME: ${{ steps.build-3.outcome }}
           CLEANUP_RESOURCE_SAFE: ${{ steps.cleanup-proof.outputs['resource-safe'] }}
+          CLEANUP_RESOURCE_REASON: ${{ steps.cleanup-proof.outputs['resource-reason'] }}
         run: |
           if ($env:LOCK_ACQUIRED -ne 'true') {
             throw 'Windows canary did not acquire the lifecycle-aware organization lock.'
@@ -350,7 +352,8 @@ jobs:
           if ($successfulBuilds -eq 0) {
             throw 'No Windows build attempt succeeded; cleanup proof cannot be accepted.'
           }
-          if ($env:CLEANUP_RESOURCE_SAFE -ne 'true') {
+          if ($env:CLEANUP_RESOURCE_SAFE -ne 'true' -or
+              $env:CLEANUP_RESOURCE_REASON -ne 'cleanup-confirmed') {
             throw 'At least one Windows build attempt ended without activation-owning cleanup proof.'
           }
 

@@ -70,12 +70,16 @@ $allowedResourceReasons = @(
     'return-missing-positive-evidence'
 )
 $classificationCases = @(
-    @{ Name = 'no attempt'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'skipped'; ExpectedSafe = 'false'; ExpectedReason = 'cleanup-evidence-unknown' },
-    @{ Name = 'stale after admission'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'failure'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
-    @{ Name = 'confirmed success'; Outcomes = @('success', 'skipped', 'skipped'); Proofs = @('true', '', ''); Guard = 'success'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
-    @{ Name = 'confirmed failed builds'; Outcomes = @('failure', 'failure', 'skipped'); Proofs = @('true', 'true', ''); Guard = 'success'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
-    @{ Name = 'failed return'; Outcomes = @('failure', 'skipped', 'skipped'); Proofs = @('false', '', ''); Guard = 'success'; ExpectedSafe = 'false'; ExpectedReason = 'return-missing-positive-evidence' },
-    @{ Name = 'cancel after safe attempt'; Outcomes = @('failure', 'cancelled', 'skipped'); Proofs = @('true', '', ''); Guard = 'success'; ExpectedSafe = 'false'; ExpectedReason = 'return-missing-positive-evidence' }
+    @{ Name = 'no attempt'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'skipped'; Recovery = 'false'; ExpectedSafe = 'false'; ExpectedReason = 'cleanup-evidence-unknown' },
+    @{ Name = 'stale after admission'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'failure'; Recovery = 'false'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
+    @{ Name = 'stale after quarantine recovery'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'failure'; Recovery = 'true'; ExpectedSafe = 'false'; ExpectedReason = 'cleanup-evidence-unknown' },
+    @{ Name = 'stale with missing recovery evidence'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'failure'; Recovery = ''; ExpectedSafe = 'false'; ExpectedReason = 'cleanup-evidence-unknown' },
+    @{ Name = 'cancelled head check after admission'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'cancelled'; Recovery = 'false'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
+    @{ Name = 'cancelled head check after quarantine recovery'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'cancelled'; Recovery = 'true'; ExpectedSafe = 'false'; ExpectedReason = 'cleanup-evidence-unknown' },
+    @{ Name = 'confirmed success'; Outcomes = @('success', 'skipped', 'skipped'); Proofs = @('true', '', ''); Guard = 'success'; Recovery = 'false'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
+    @{ Name = 'confirmed failed builds'; Outcomes = @('failure', 'failure', 'skipped'); Proofs = @('true', 'true', ''); Guard = 'success'; Recovery = 'false'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
+    @{ Name = 'failed return'; Outcomes = @('failure', 'skipped', 'skipped'); Proofs = @('false', '', ''); Guard = 'success'; Recovery = 'false'; ExpectedSafe = 'false'; ExpectedReason = 'return-missing-positive-evidence' },
+    @{ Name = 'cancel after safe attempt'; Outcomes = @('failure', 'cancelled', 'skipped'); Proofs = @('true', '', ''); Guard = 'success'; Recovery = 'false'; ExpectedSafe = 'false'; ExpectedReason = 'return-missing-positive-evidence' }
 )
 foreach ($case in $classificationCases) {
     $outputPath = Join-Path ([System.IO.Path]::GetTempPath()) ("resource-proof-{0}.txt" -f [guid]::NewGuid())
@@ -86,6 +90,7 @@ foreach ($case in $classificationCases) {
             [Environment]::SetEnvironmentVariable("BUILD_${attempt}_RESOURCE_SAFE", $case.Proofs[$attempt - 1])
         }
         $env:POST_ACQUIRE_HEAD_OUTCOME = $case.Guard
+        $env:QUARANTINE_RECOVERED = $case.Recovery
         & $classifier
         $actual = @{}
         foreach ($line in Get-Content -LiteralPath $outputPath) {
