@@ -1,4 +1,6 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { parse } from 'yaml';
 import {
@@ -9,6 +11,8 @@ import {
 const root = path.resolve(process.argv[2] || '.');
 const failures = [];
 const buildLockSha = '59a2fa98224569e5a697f271a3ac4b866c53ac2c';
+const runBashContractTests =
+  process.platform !== 'win32' || process.env.RUN_BASH_CONTRACT_TESTS === 'true';
 
 function read(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
@@ -58,6 +62,19 @@ requireText(
   '[DateTime]::UtcNow.AddSeconds(120)',
 );
 requireText('RC010', 'dist/platforms/windows/return_license.ps1', '$RETURN_LICENSE_OUTPUT.Kill()');
+requireText('RC014', 'scripts/classify-build-resource-proof.ps1', "'cleanup-confirmed'");
+requireText('RC014', 'scripts/classify-build-resource-proof.ps1', "'cleanup-evidence-unknown'");
+requireText(
+  'RC014',
+  'scripts/classify-build-resource-proof.ps1',
+  "'return-missing-positive-evidence'",
+);
+const cleanupClassifier = read('scripts/classify-build-resource-proof.ps1');
+if (
+  cleanupClassifier.includes('no-activation-current-head-rejected') ||
+  cleanupClassifier.includes('no-activation-proof')
+)
+  failures.push('RC014: cleanup classifier must emit only pinned build-lock reason codes');
 requireText(
   'RC006',
   'src/model/resource-cleanup-proof.ts',
@@ -93,20 +110,148 @@ requireText('RC012', 'dist/index.js', 'UNITY_BUILDER_RESOURCE_PROOF_NONCE');
 requireText('RC013', 'dist/index.js', 'resourceSafe');
 
 const windowsWorkflow = parse(read('.github/workflows/build-tests-windows.yml'));
+const windowsMatrix = windowsWorkflow.jobs?.['matrix-config'];
+const windowsCurrentHead = windowsWorkflow.jobs?.['current-pr-head'];
 const windowsPreflight = windowsWorkflow.jobs?.['runner-preflight'];
 const windowsJob = windowsWorkflow.jobs?.buildForAllPlatformsWindows;
 const windowsSteps = windowsJob?.steps || [];
 const windowsStepIndex = (id) => windowsSteps.findIndex((step) => step.id === id);
 const windowsStep = (id) => windowsSteps.find((step) => step.id === id);
 if (
+  JSON.stringify(windowsWorkflow.permissions) !==
+  JSON.stringify({ contents: 'read', 'pull-requests': 'read' })
+)
+  failures.push('RC014: Windows canary must grant only read access to contents and PR state');
+if (
   !Object.hasOwn(windowsWorkflow.on || {}, 'push') ||
+  !Object.hasOwn(windowsWorkflow.on || {}, 'pull_request') ||
   !Object.hasOwn(windowsWorkflow.on || {}, 'workflow_dispatch')
 )
-  failures.push('RC014: Windows workflow must retain push static checks and manual canaries');
-if (windowsJob?.if !== "github.event_name == 'workflow_dispatch'")
-  failures.push('RC014: licensed Windows matrix must be manual-only');
+  failures.push('RC014: Windows workflow must retain push checks, trusted PR smoke, and dispatch');
+const dispatchMode = windowsWorkflow.on?.workflow_dispatch?.inputs?.mode;
 if (
-  windowsPreflight?.if !== "github.event_name == 'workflow_dispatch'" ||
+  dispatchMode?.type !== 'choice' ||
+  dispatchMode?.default !== 'preflight-only' ||
+  JSON.stringify(dispatchMode?.options) !== JSON.stringify(['preflight-only', 'smoke', 'full'])
+)
+  failures.push('RC014: dispatch must default safely and require an explicit licensed mode');
+const trustedPr =
+  "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'";
+const expectedPreflightCondition = `github.event_name == 'workflow_dispatch' || (${trustedPr})`;
+const expectedLicensedCondition = `(github.event_name == 'workflow_dispatch' && inputs.mode != 'preflight-only') || (${trustedPr})`;
+if (windowsWorkflow.concurrency?.['cancel-in-progress'] !== false)
+  failures.push('RC014: automatic supersession must never cancel a licensed Windows holder');
+if (windowsJob?.if !== expectedLicensedCondition)
+  failures.push('RC014: licensed Windows work must be a bounded trusted PR or explicit dispatch');
+const hostedHeadStep = windowsCurrentHead?.steps?.[0];
+if (
+  windowsCurrentHead?.['runs-on'] !== 'ubuntu-latest' ||
+  hostedHeadStep?.if !== trustedPr ||
+  hostedHeadStep?.uses !== 'actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b' ||
+  !hostedHeadStep?.with?.script?.includes("current.state !== 'open'") ||
+  !hostedHeadStep?.with?.script?.includes("current.base.ref !== 'main'") ||
+  !hostedHeadStep?.with?.script?.includes('current.head.sha !== expected.head.sha')
+)
+  failures.push('RC014: a hosted prerequisite must reject stale or ineligible licensed PRs');
+if (
+  windowsMatrix?.outputs?.matrix !== '${{ steps.select.outputs.matrix }}' ||
+  windowsMatrix?.steps?.[0]?.id !== 'select' ||
+  !windowsMatrix?.steps?.[0]?.run?.includes('2022.3.62f3') ||
+  !windowsMatrix?.steps?.[0]?.run?.includes('StandaloneWindows64') ||
+  !windowsMatrix?.steps?.[0]?.run?.includes('MODE')
+)
+  failures.push(
+    'RC014: matrix selection must encode one bounded smoke and the explicit full matrix',
+  );
+const matrixScript = windowsMatrix?.steps?.[0]?.run || '';
+const matrixAssignment = (name) => {
+  const match = matrixScript.match(new RegExp(`^${name}='([^']+)'$`, 'm'));
+  if (!match) return undefined;
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return undefined;
+  }
+};
+const smokeMatrix = matrixAssignment('smoke');
+const fullMatrix = matrixAssignment('full');
+const requiredMatrixKeys = ['projectPath', 'unityVersion', 'targetPlatform', 'enableGpu'];
+const matrixCardinality = (matrix) => {
+  if (!matrix) return 0;
+  const baseKeys = requiredMatrixKeys.filter((key) => Array.isArray(matrix[key]));
+  const baseCount = baseKeys.length
+    ? baseKeys.reduce((count, key) => count * matrix[key].length, 1)
+    : 0;
+  return baseCount + (matrix.include?.length || 0);
+};
+const fullBaseCount = fullMatrix
+  ? requiredMatrixKeys.reduce(
+      (count, key) => count * (Array.isArray(fullMatrix[key]) ? fullMatrix[key].length : 0),
+      1,
+    )
+  : 0;
+const includesCannotMergeIntoBase = fullMatrix?.include?.every((entry) =>
+  requiredMatrixKeys.some(
+    (key) => Array.isArray(fullMatrix[key]) && !fullMatrix[key].includes(entry[key]),
+  ),
+);
+if (
+  smokeMatrix?.include?.length !== 1 ||
+  requiredMatrixKeys.some((key) => !Object.hasOwn(smokeMatrix.include[0] || {}, key)) ||
+  fullBaseCount + (fullMatrix?.include?.length || 0) !== 15 ||
+  !includesCannotMergeIntoBase ||
+  fullMatrix?.include?.some((entry) =>
+    requiredMatrixKeys.some((key) => !Object.hasOwn(entry || {}, key)),
+  )
+)
+  failures.push(
+    'RC014: smoke must be one complete leg and full dispatch must preserve 15 complete legs',
+  );
+if (runBashContractTests && matrixScript) {
+  const selectorCases = [
+    ['pull request', 'pull_request', '', 0, 1],
+    ['push', 'push', '', 0, 1],
+    ['dispatch preflight', 'workflow_dispatch', 'preflight-only', 0, 1],
+    ['dispatch smoke', 'workflow_dispatch', 'smoke', 0, 1],
+    ['dispatch full', 'workflow_dispatch', 'full', 0, 15],
+    ['unsupported mode', 'workflow_dispatch', 'malformed', 1, 0],
+    ['unsupported event', 'schedule', '', 1, 0],
+  ];
+  for (const [name, eventName, mode, expectedStatus, expectedCount] of selectorCases) {
+    const outputDirectory = mkdtempSync(path.join(tmpdir(), 'unity-windows-matrix-'));
+    const outputPath = path.join(outputDirectory, 'output');
+    try {
+      const result = spawnSync('bash', ['-c', matrixScript], {
+        env: {
+          ...process.env,
+          EVENT_NAME: eventName,
+          MODE: mode,
+          GITHUB_OUTPUT: outputPath,
+        },
+        encoding: 'utf8',
+      });
+      let actualCount = 0;
+      if (existsSync(outputPath)) {
+        const match = readFileSync(outputPath, 'utf8').match(/^matrix=(.+)$/m);
+        if (match) {
+          try {
+            actualCount = matrixCardinality(JSON.parse(match[1]));
+          } catch {
+            actualCount = -1;
+          }
+        }
+      }
+      if (result.status !== expectedStatus || actualCount !== expectedCount)
+        failures.push(
+          `RC014: selector case ${name} expected status/count ${expectedStatus}/${expectedCount}, got ${result.status}/${actualCount}: ${result.stdout}${result.stderr}`,
+        );
+    } finally {
+      rmSync(outputDirectory, { recursive: true, force: true });
+    }
+  }
+}
+if (
+  windowsPreflight?.if !== expectedPreflightCondition ||
   windowsPreflight?.['runs-on'] !== 'ubuntu-latest' ||
   windowsPreflight?.steps?.[0]?.uses !==
     `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/check-unity-runner-availability@${buildLockSha}` ||
@@ -119,23 +264,68 @@ if (
 )
   failures.push('RC014: Windows canary must fail closed through the reader-App preflight');
 if (
-  windowsJob?.needs !== 'runner-preflight' ||
+  JSON.stringify(windowsJob?.needs) !==
+    JSON.stringify([
+      'resource-cleanup-proof-contract',
+      'matrix-config',
+      'current-pr-head',
+      'runner-preflight',
+    ]) ||
+  windowsJob?.strategy?.matrix !== '${{ fromJSON(needs.matrix-config.outputs.matrix) }}' ||
   JSON.stringify(windowsJob?.['runs-on']) !== JSON.stringify(['self-hosted', 'Windows', 'RAM-64GB'])
 )
   failures.push('RC014: licensed Windows matrix must run only on the preflighted fleet');
 if (windowsJob?.strategy?.['max-parallel'] !== 1)
   failures.push('RC014: licensed Windows matrix must admit only one runner at a time');
+const currentHeadSteps = [
+  ['current-pr-head-before-acquire', "${{ github.event_name == 'pull_request' }}"],
+  [
+    'current-pr-head-after-acquire',
+    "${{ steps.acquire-build-lock.outputs.acquired == 'true' && github.event_name == 'pull_request' }}",
+  ],
+];
+const acquireIndex = windowsStepIndex('acquire-build-lock');
+if (
+  currentHeadSteps.some(([id, expectedCondition]) => {
+    const step = windowsStep(id);
+    return (
+      step?.if !== expectedCondition ||
+      step?.env?.GH_TOKEN !== '${{ github.token }}' ||
+      step?.env?.EXPECTED_BASE_REF !== 'main' ||
+      step?.env?.EXPECTED_HEAD_REPOSITORY !== '${{ github.repository }}' ||
+      step?.run !== './scripts/assert-current-pr-head.ps1'
+    );
+  }) ||
+  windowsStepIndex('current-pr-head-before-acquire') !== acquireIndex - 1 ||
+  !read('scripts/assert-current-pr-head.ps1').includes("$pullRequest.state -eq 'open'") ||
+  !read('scripts/assert-current-pr-head.ps1').includes(
+    '$pullRequest.head.sha -eq $env:EXPECTED_HEAD_SHA',
+  ) ||
+  !read('scripts/assert-current-pr-head.ps1').includes('-TimeoutSec 30')
+)
+  failures.push('RC014: stale PR revisions must stop before licensed runner setup or acquisition');
 const expectedBuildConditions = [
   "${{ steps.acquire-build-lock.outputs.acquired == 'true' }}",
-  "${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' }}",
-  "${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-2.outcome == 'failure' }}",
+  "${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-1.outputs.resourceSafe == 'true' }}",
+  "${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-1.outputs.resourceSafe == 'true' && steps.build-2.outcome == 'failure' && steps.build-2.outputs.resourceSafe == 'true' }}",
 ];
 if (
   [1, 2, 3].some(
-    (attempt) => windowsStep(`build-${attempt}`)?.if !== expectedBuildConditions[attempt - 1],
+    (attempt) =>
+      windowsStep(`build-${attempt}`)?.if !== expectedBuildConditions[attempt - 1] ||
+      windowsStep(`build-${attempt}`)?.with?.buildProfile !== '${{ matrix.buildProfile }}',
   )
 )
-  failures.push('RC014: every licensed Windows attempt must require organization lock ownership');
+  failures.push(
+    'RC014: every licensed Windows attempt must require lock ownership and preserve matrix inputs',
+  );
+const retrySleeps = windowsSteps.filter((step) => step.name === 'Sleep for Retry');
+if (
+  retrySleeps.length !== 2 ||
+  retrySleeps[0]?.if !== expectedBuildConditions[1] ||
+  retrySleeps[1]?.if !== expectedBuildConditions[2]
+)
+  failures.push('RC014: outer retries must stop without positive cleanup proof');
 const lifecycleIndices = [
   windowsStepIndex('acquire-build-lock'),
   windowsStepIndex('build-1'),
@@ -154,7 +344,7 @@ if (
   windowsStep('acquire-build-lock')?.uses !==
     `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@${buildLockSha}` ||
   windowsStep('acquire-build-lock')?.with?.['require-resource-lifecycle'] !== 'true' ||
-  windowsStep('acquire-build-lock')?.with?.['minimum-release-cooldown-seconds'] !== '360'
+  windowsStep('acquire-build-lock')?.with?.['minimum-release-cooldown-seconds'] !== '1'
 )
   failures.push('RC014: Windows canary must atomically require the lifecycle-aware lock contract');
 const windowsRelease = windowsSteps.find((step) => step.name === 'Release organization Unity lock');
@@ -162,11 +352,23 @@ const windowsVerify = windowsSteps.find(
   (step) => step.name === 'Verify activation-owning cleanup proof',
 );
 const cleanupProof = windowsStep('cleanup-proof');
+const postAcquireHead = windowsStep('current-pr-head-after-acquire');
 const expectedReleaseCondition =
   "${{ always() && (steps.acquire-build-lock.outcome == 'success' || steps.acquire-build-lock.outcome == 'failure' || steps.acquire-build-lock.outcome == 'cancelled') }}";
 if (
+  postAcquireHead?.if !==
+    "${{ steps.acquire-build-lock.outputs.acquired == 'true' && github.event_name == 'pull_request' }}" ||
+  postAcquireHead?.run !== './scripts/assert-current-pr-head.ps1' ||
+  windowsStepIndex('current-pr-head-after-acquire') !==
+    windowsStepIndex('acquire-build-lock') + 1 ||
+  windowsStepIndex('build-1') !== windowsStepIndex('current-pr-head-after-acquire') + 1
+)
+  failures.push('RC014: FIFO admission must revalidate the exact PR head before activation');
+if (
   cleanupProof?.if !== "${{ always() && steps.acquire-build-lock.outcome == 'success' }}" ||
   cleanupProof?.run !== './scripts/classify-build-resource-proof.ps1' ||
+  cleanupProof?.env?.POST_ACQUIRE_HEAD_OUTCOME !==
+    '${{ steps.current-pr-head-after-acquire.outcome }}' ||
   [1, 2, 3].some(
     (attempt) =>
       cleanupProof?.env?.[`BUILD_${attempt}_OUTCOME`] !==
@@ -184,8 +386,7 @@ if (
   failures.push(
     'RC014: Windows canary must fail after release when lock ownership was not acquired',
   );
-const expectedRunnerId =
-  '${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}';
+const expectedRunnerId = '${{ runner.name }}';
 const expectedHolderSuffix = '${{ github.job }}-${{ strategy.job-index }}';
 if (
   [windowsStep('acquire-build-lock'), windowsRelease].some(
@@ -194,7 +395,9 @@ if (
       step?.with?.['holder-id-suffix'] !== expectedHolderSuffix,
   )
 )
-  failures.push('RC014: Windows acquire and release must use the same unique ephemeral identity');
+  failures.push(
+    'RC014: Windows acquire and release must use the same stable physical runner and unique holder identity',
+  );
 if (
   windowsRelease?.uses !==
     `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@${buildLockSha}` ||
@@ -203,27 +406,101 @@ if (
     "${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'confirmed' || 'unknown' }}" ||
   windowsRelease?.with?.['resource-health'] !== 'healthy' ||
   windowsRelease?.with?.['resource-reason'] !==
-    "${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'cleanup-confirmed' || 'return-missing-positive-evidence' }}" ||
+    "${{ steps.cleanup-proof.outputs['resource-reason'] }}" ||
   Object.hasOwn(windowsRelease?.with || {}, 'resource-safe')
 )
   failures.push('RC014: Windows release must report typed schema-5 cleanup evidence');
 
 const windowsAggregate = windowsWorkflow.jobs?.['windows-license-ci'];
+const aggregateStep = windowsAggregate?.steps?.[0];
 if (
   windowsAggregate?.if !== '${{ always() }}' ||
   JSON.stringify(windowsAggregate?.needs) !==
     JSON.stringify([
       'resource-cleanup-proof-contract',
+      'matrix-config',
+      'current-pr-head',
       'runner-preflight',
       'buildForAllPlatformsWindows',
     ]) ||
-  windowsAggregate?.steps?.[0]?.env?.PREFLIGHT_RESULT !== '${{ needs.runner-preflight.result }}' ||
-  windowsAggregate?.steps?.[0]?.env?.UNITY_RESULT !==
-    '${{ needs.buildForAllPlatformsWindows.result }}' ||
-  !windowsAggregate?.steps?.[0]?.run?.includes('PREFLIGHT_RESULT') ||
-  !windowsAggregate?.steps?.[0]?.run?.includes('UNITY_RESULT')
+  aggregateStep?.env?.MATRIX_RESULT !== '${{ needs.matrix-config.result }}' ||
+  aggregateStep?.env?.HEAD_RESULT !== '${{ needs.current-pr-head.result }}' ||
+  aggregateStep?.env?.PREFLIGHT_RESULT !== '${{ needs.runner-preflight.result }}' ||
+  aggregateStep?.env?.UNITY_RESULT !== '${{ needs.buildForAllPlatformsWindows.result }}' ||
+  aggregateStep?.env?.PREFLIGHT_REQUIRED !==
+    "${{ github.event_name == 'workflow_dispatch' || (" + trustedPr + ') }}' ||
+  aggregateStep?.env?.LICENSED_REQUIRED !==
+    "${{ (github.event_name == 'workflow_dispatch' && inputs.mode != 'preflight-only') || (" +
+      trustedPr +
+      ') }}' ||
+  !aggregateStep?.run?.includes('PREFLIGHT_REQUIRED') ||
+  !aggregateStep?.run?.includes('LICENSED_REQUIRED') ||
+  !aggregateStep?.run?.includes('HEAD_RESULT')
 )
   failures.push('RC014: Windows canary aggregate must reject unavailable or skipped licensed work');
+
+if (runBashContractTests && aggregateStep?.run) {
+  const aggregateCases = [
+    ['trusted PR success', 'true', 'true', 'success', 'success', 'success', 0],
+    ['preflight-only success', 'true', 'false', 'success', 'success', 'skipped', 0],
+    ['fork, Dependabot, or push', 'false', 'false', 'success', 'skipped', 'skipped', 0],
+    ['head validation failed', 'true', 'true', 'failure', 'success', 'success', 1],
+    ['runner unavailable', 'true', 'true', 'success', 'failure', 'skipped', 1],
+    ['licensed work skipped', 'true', 'true', 'success', 'success', 'skipped', 1],
+    ['licensed work failed', 'true', 'true', 'success', 'success', 'failure', 1],
+    ['licensed work cancelled', 'true', 'true', 'success', 'success', 'cancelled', 1],
+    ['unexpected unlicensed work', 'false', 'false', 'success', 'skipped', 'success', 1],
+  ];
+  for (const [
+    name,
+    preflightRequired,
+    licensedRequired,
+    head,
+    preflight,
+    unity,
+    expected,
+  ] of aggregateCases) {
+    const outputDirectory = mkdtempSync(path.join(tmpdir(), 'unity-windows-aggregate-'));
+    const summaryPath = path.join(outputDirectory, 'summary');
+    try {
+      const result = spawnSync('bash', ['-c', aggregateStep.run], {
+        env: {
+          ...process.env,
+          PROOF_RESULT: 'success',
+          MATRIX_RESULT: 'success',
+          HEAD_RESULT: head,
+          PREFLIGHT_REQUIRED: preflightRequired,
+          LICENSED_REQUIRED: licensedRequired,
+          PREFLIGHT_RESULT: preflight,
+          UNITY_RESULT: unity,
+          GITHUB_STEP_SUMMARY: summaryPath,
+        },
+        encoding: 'utf8',
+      });
+      const summary = existsSync(summaryPath) ? readFileSync(summaryPath, 'utf8') : '';
+      if (
+        result.status !== expected ||
+        (name === 'fork, Dependabot, or push' &&
+          (!result.stdout.includes('Unlicensed by policy') ||
+            !summary.includes('Unlicensed by policy')))
+      )
+        failures.push(
+          `RC014: aggregate case ${name} expected ${expected}, got ${result.status}: ${result.stdout}${result.stderr}${summary}`,
+        );
+    } finally {
+      rmSync(outputDirectory, { recursive: true, force: true });
+    }
+  }
+}
+
+const upstreamSync = read('.github/workflows/upstream-sync.yml');
+const verifierCopies =
+  upstreamSync.match(/cp .*verify-resource-cleanup-contract\.mjs .*verify\.mjs/g) || [];
+const policyCopies =
+  upstreamSync.match(/cp .*workflow-credential-policy\.mjs .*workflow-credential-policy\.mjs/g) ||
+  [];
+if (verifierCopies.length !== 2 || policyCopies.length !== verifierCopies.length)
+  failures.push('RC014: every isolated upstream verifier must copy its imported policy module');
 
 for (const [platform, file, jobName] of [
   ['macOS', '.github/workflows/build-tests-mac.yml', 'buildForAllPlatformsMacOS'],

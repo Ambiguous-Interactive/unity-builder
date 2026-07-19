@@ -1,8 +1,29 @@
 name: Builds - Windows
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Choose preflight only, one licensed smoke, or the complete matrix.'
+        required: true
+        default: preflight-only
+        type: choice
+        options:
+          - preflight-only
+          - smoke
+          - full
   push:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # A newer commit must not terminate a job after it owns a Unity activation.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   resource-cleanup-proof-contract:
@@ -13,9 +34,71 @@ jobs:
       - shell: pwsh
         run: ./scripts/test-windows-resource-proof.ps1
 
+  matrix-config:
+    name: Select Windows validation matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Select bounded or full matrix
+        id: select
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          smoke='{"include":[{"projectPath":"test-project","unityVersion":"2022.3.62f3","targetPlatform":"StandaloneWindows64","enableGpu":false}]}'
+          full='{"projectPath":["test-project"],"unityVersion":["2021.3.45f2","2022.3.62f3","2023.2.22f1"],"targetPlatform":["Android","StandaloneWindows64","WSAPlayer","tvOS"],"enableGpu":[false],"include":[{"projectPath":"test-project","unityVersion":"2023.2.2f1","targetPlatform":"StandaloneWindows64","enableGpu":true},{"projectPath":"test-project","unityVersion":"6000.0.36f1","targetPlatform":"StandaloneWindows64","enableGpu":false},{"projectPath":"test-project","unityVersion":"6000.0.36f1","targetPlatform":"StandaloneWindows64","enableGpu":false,"buildProfile":"Assets/Settings/Build Profiles/Sample Windows Build Profile.asset"}]}'
+          case "${EVENT_NAME}:${MODE:-}" in
+            workflow_dispatch:full) matrix="${full}" ;;
+            workflow_dispatch:preflight-only|workflow_dispatch:smoke|pull_request:|push:) matrix="${smoke}" ;;
+            *)
+              echo "::error::Unsupported Windows validation request: event=${EVENT_NAME}, mode=${MODE:-unset}."
+              exit 1
+              ;;
+          esac
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+
+  current-pr-head:
+    name: Current pull request head
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject stale licensed pull request revision
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.user.login != 'dependabot[bot]'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const expected = context.payload.pull_request;
+            const { data: current } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: expected.number
+            });
+            if (current.state !== 'open' ||
+                current.base.ref !== 'main' ||
+                current.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}` ||
+                current.head.sha !== expected.head.sha) {
+              throw new Error(`Refusing stale or ineligible licensed PR revision ${expected.head.sha}.`);
+            }
+
+      - name: Record non-PR policy path
+        if: >-
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name != github.repository ||
+          github.event.pull_request.user.login == 'dependabot[bot]'
+        run: echo 'No licensed pull request head requires validation.'
+
   runner-preflight:
     name: Self-hosted runner access preflight
-    if: github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -28,37 +111,17 @@ jobs:
 
   buildForAllPlatformsWindows:
     name: ${{ matrix.targetPlatform }} on ${{ matrix.unityVersion }}
-    if: github.event_name == 'workflow_dispatch'
-    needs: runner-preflight
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.mode != 'preflight-only') ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]')
+    needs: [resource-cleanup-proof-contract, matrix-config, current-pr-head, runner-preflight]
     runs-on: [self-hosted, Windows, RAM-64GB]
     strategy:
       fail-fast: false
       max-parallel: 1
-      matrix:
-        projectPath:
-          - test-project
-        unityVersion:
-          - 2021.3.45f2
-          - 2022.3.62f3
-          - 2023.2.22f1
-        targetPlatform:
-          - Android # Build an Android apk.
-          - StandaloneWindows64 # Build a Windows 64-bit standalone.
-          - WSAPlayer # Build a UWP App
-          - tvOS # Build an Apple TV XCode project
-        enableGpu:
-          - false
-        include:
-          # Additionally test enableGpu build for a standalone windows target
-          - projectPath: test-project
-            unityVersion: 2023.2.2f1
-            targetPlatform: StandaloneWindows64
-            enableGpu: true
-          - unityVersion: 6000.0.36f1
-            targetPlatform: StandaloneWindows64
-          - unityVersion: 6000.0.36f1
-            targetPlatform: StandaloneWindows64
-            buildProfile: 'Assets/Settings/Build Profiles/Sample Windows Build Profile.asset'
+      matrix: ${{ fromJSON(needs.matrix-config.outputs.matrix) }}
 
     steps:
       ###########################
@@ -114,6 +177,18 @@ jobs:
           Write-Error "Docker daemon did not start within $($maxRetries * $retryDelay) seconds"
           exit 1
 
+      - name: Recheck pull request revision before lock acquisition
+        id: current-pr-head-before-acquire
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASE_REF: main
+          EXPECTED_HEAD_REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST_API_URL: ${{ github.api_url }}/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}
+        run: ./scripts/assert-current-pr-head.ps1
+
       - name: Acquire organization Unity lock
         id: acquire-build-lock
         timeout-minutes: 45
@@ -124,14 +199,26 @@ jobs:
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
           # Each Docker activation is a distinct cleanup identity even when
           # multiple matrix legs reuse the same self-hosted machine.
-          runner-id: ${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}
+          runner-id: ${{ runner.name }}
           holder-id-suffix: ${{ github.job }}-${{ strategy.job-index }}
           timeout-minutes: '40'
           require-resource-lifecycle: 'true'
-          minimum-release-cooldown-seconds: '360'
+          minimum-release-cooldown-seconds: '1'
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
           BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}
+
+      - name: Recheck pull request revision after FIFO admission
+        id: current-pr-head-after-acquire
+        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' && github.event_name == 'pull_request' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASE_REF: main
+          EXPECTED_HEAD_REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST_API_URL: ${{ github.api_url }}/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}
+        run: ./scripts/assert-current-pr-head.ps1
 
       ###########################
       #          Build          #
@@ -159,7 +246,7 @@ jobs:
       # We use dirty build because we are replacing the default project settings file above
 
       - name: Sleep for Retry
-        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' }}
+        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-1.outputs.resourceSafe == 'true' }}
         run: |
           Start-Sleep -s 120
 
@@ -168,7 +255,7 @@ jobs:
         id: build-2
         continue-on-error: true
         timeout-minutes: 30
-        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' }}
+        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-1.outputs.resourceSafe == 'true' }}
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
@@ -179,13 +266,14 @@ jobs:
           projectPath: ${{ matrix.projectPath }}
           unityVersion: ${{ matrix.unityVersion }}
           targetPlatform: ${{ matrix.targetPlatform }}
+          buildProfile: ${{ matrix.buildProfile }}
           enableGpu: ${{ matrix.enableGpu }}
           customParameters: -profile SomeProfile -someBoolean -someValue exampleValue
           allowDirtyBuild: true
       # We use dirty build because we are replacing the default project settings file above
 
       - name: Sleep for Retry
-        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-2.outcome == 'failure' }}
+        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-1.outputs.resourceSafe == 'true' && steps.build-2.outcome == 'failure' && steps.build-2.outputs.resourceSafe == 'true' }}
         run: |
           Start-Sleep -s 240
 
@@ -193,7 +281,7 @@ jobs:
         uses: ./
         id: build-3
         timeout-minutes: 30
-        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-2.outcome == 'failure' }}
+        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' && steps.build-1.outcome == 'failure' && steps.build-1.outputs.resourceSafe == 'true' && steps.build-2.outcome == 'failure' && steps.build-2.outputs.resourceSafe == 'true' }}
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
@@ -204,6 +292,7 @@ jobs:
           projectPath: ${{ matrix.projectPath }}
           unityVersion: ${{ matrix.unityVersion }}
           targetPlatform: ${{ matrix.targetPlatform }}
+          buildProfile: ${{ matrix.buildProfile }}
           enableGpu: ${{ matrix.enableGpu }}
           customParameters: -profile SomeProfile -someBoolean -someValue exampleValue
           allowDirtyBuild: true
@@ -220,6 +309,7 @@ jobs:
           BUILD_2_RESOURCE_SAFE: ${{ steps.build-2.outputs.resourceSafe }}
           BUILD_3_OUTCOME: ${{ steps.build-3.outcome }}
           BUILD_3_RESOURCE_SAFE: ${{ steps.build-3.outputs.resourceSafe }}
+          POST_ACQUIRE_HEAD_OUTCOME: ${{ steps.current-pr-head-after-acquire.outcome }}
         run: ./scripts/classify-build-resource-proof.ps1
 
       - name: Release organization Unity lock
@@ -230,11 +320,11 @@ jobs:
         with:
           lock-name: wallstop-organization-builds
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
-          runner-id: ${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}
+          runner-id: ${{ runner.name }}
           holder-id-suffix: ${{ github.job }}-${{ strategy.job-index }}
           resource-cleanup-status: ${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'confirmed' || 'unknown' }}
           resource-health: healthy
-          resource-reason: ${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'cleanup-confirmed' || 'return-missing-positive-evidence' }}
+          resource-reason: ${{ steps.cleanup-proof.outputs['resource-reason'] }}
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
           BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}
@@ -281,14 +371,19 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - resource-cleanup-proof-contract
+      - matrix-config
+      - current-pr-head
       - runner-preflight
       - buildForAllPlatformsWindows
     steps:
       - name: Require requested licensed validation
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
           PROOF_RESULT: ${{ needs.resource-cleanup-proof-contract.result }}
+          MATRIX_RESULT: ${{ needs.matrix-config.result }}
+          HEAD_RESULT: ${{ needs.current-pr-head.result }}
+          PREFLIGHT_REQUIRED: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
+          LICENSED_REQUIRED: ${{ (github.event_name == 'workflow_dispatch' && inputs.mode != 'preflight-only') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
           PREFLIGHT_RESULT: ${{ needs.runner-preflight.result }}
           UNITY_RESULT: ${{ needs.buildForAllPlatformsWindows.result }}
         run: |
@@ -297,14 +392,39 @@ jobs:
             echo "::error::Resource cleanup proof contract finished with ${PROOF_RESULT}."
             exit 1
           fi
-          if [ "${EVENT_NAME}" != "workflow_dispatch" ]; then
-            exit 0
-          fi
-          if [ "${PREFLIGHT_RESULT}" != "success" ]; then
-            echo "::error::Unity runner preflight finished with ${PREFLIGHT_RESULT}."
+          if [ "${MATRIX_RESULT}" != "success" ]; then
+            echo "::error::Windows matrix selection finished with ${MATRIX_RESULT}."
             exit 1
           fi
-          if [ "${UNITY_RESULT}" != "success" ]; then
-            echo "::error::Licensed Unity validation finished with ${UNITY_RESULT}."
+          if [ "${HEAD_RESULT}" != "success" ]; then
+            echo "::error::Current PR head validation finished with ${HEAD_RESULT}."
+            exit 1
+          fi
+
+          require_result() {
+            local label="$1" required="$2" actual="$3" expected
+            case "${required}" in
+              true) expected=success ;;
+              false) expected=skipped ;;
+              *)
+                echo "::error::${label} requirement was not a boolean: ${required}."
+                exit 1
+                ;;
+            esac
+            if [ "${actual}" != "${expected}" ]; then
+              echo "::error::${label} finished with ${actual}; expected ${expected}."
+              exit 1
+            fi
+          }
+
+          require_result 'Unity runner preflight' "${PREFLIGHT_REQUIRED}" "${PREFLIGHT_RESULT}"
+          require_result 'Licensed Unity validation' "${LICENSED_REQUIRED}" "${UNITY_RESULT}"
+          if [ "${PREFLIGHT_REQUIRED}" = false ] && [ "${LICENSED_REQUIRED}" = false ]; then
+            message='Unlicensed by policy: fork, Dependabot, and push events do not receive organization runner or Unity credentials.'
+            echo "::notice::${message}"
+            printf '%s\n' "${message}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          if [ "${LICENSED_REQUIRED}" = true ] && [ "${PREFLIGHT_REQUIRED}" != true ]; then
+            echo "::error::Licensed validation cannot run without the hosted runner preflight."
             exit 1
           fi

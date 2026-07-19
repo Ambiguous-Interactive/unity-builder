@@ -45,16 +45,9 @@ export default class Versioning {
    * Log up to maxDiffLines of the git diff.
    */
   static async logDiff() {
-    const diffCommand = `git --no-pager diff | head -n ${this.maxDiffLines.toString()}`;
-    await System.run(
-      'sh',
-      undefined,
-      {
-        input: Buffer.from(diffCommand),
-        silent: true,
-      },
-      false,
-    );
+    const diff = await this.git(['--no-pager', 'diff']);
+    const boundedDiff = diff.split('\n').slice(0, this.maxDiffLines).join('\n');
+    if (boundedDiff !== '') core.info(boundedDiff);
   }
 
   /**
@@ -262,17 +255,10 @@ export default class Versioning {
    * Note: Currently this is run in all OSes, so the syntax must be cross-platform.
    */
   static async hasAnyVersionTags() {
-    const numberOfTagsAsString = await System.run('sh', undefined, {
-      input: Buffer.from(
-        `git tag --list --merged HEAD | grep -E '${this.grepCompatibleInputVersionRegex}' | wc -l`,
-      ),
-      cwd: Input.projectPath,
-      silent: false,
-    });
-
-    const numberOfTags = Number.parseInt(numberOfTagsAsString, 10);
-
-    return numberOfTags !== 0;
+    const tags = await this.git(['tag', '--list', '--merged', 'HEAD']);
+    return tags
+      .split('\n')
+      .some((tag) => new RegExp(this.grepCompatibleInputVersionRegex).test(tag));
   }
 
   /**

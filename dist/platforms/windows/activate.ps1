@@ -13,25 +13,28 @@ if ( ($null -ne ${env:UNITY_SERIAL}) -and ($null -ne ${env:UNITY_EMAIL}) -and ($
   #
   # This will activate unity, using the serial activation process.
   #
-  Write-Output "Requesting activation"
+  $MAX_ACTIVATION_ATTEMPTS = 2
+  $ACTIVATION_RETRY_DELAY_SECONDS = 360
+  for ($ACTIVATION_ATTEMPT = 1; $ACTIVATION_ATTEMPT -le $MAX_ACTIVATION_ATTEMPTS; $ACTIVATION_ATTEMPT++) {
+    Write-Output "Requesting activation (attempt $ACTIVATION_ATTEMPT/$MAX_ACTIVATION_ATTEMPTS)"
 
-  $ACTIVATION_OUTPUT = Start-Process -FilePath "$Env:UNITY_PATH/Editor/Unity.exe" `
-                                     -NoNewWindow `
-                                     -PassThru `
-                                     -ArgumentList  "-batchmode `
-                                                     -quit `
-                                                     -nographics `
-                                                     -username $Env:UNITY_EMAIL `
-                                                     -password $Env:UNITY_PASSWORD `
-                                                     -serial $Env:UNITY_SERIAL `
-                                                     -projectPath c:/BlankProject `
-                                                     -logfile -"
+    $ACTIVATION_OUTPUT = Start-Process -FilePath "$Env:UNITY_PATH/Editor/Unity.exe" `
+                                       -NoNewWindow `
+                                       -PassThru `
+                                       -ArgumentList  "-batchmode `
+                                                       -quit `
+                                                       -nographics `
+                                                       -username $Env:UNITY_EMAIL `
+                                                       -password $Env:UNITY_PASSWORD `
+                                                       -serial $Env:UNITY_SERIAL `
+                                                       -projectPath c:/BlankProject `
+                                                       -logfile -"
 
-  # Cache the handle so exit code works properly
-  # https://stackoverflow.com/questions/10262231/obtaining-exitcode-using-start-process-and-waitforexit-instead-of-wait
-  $unityHandle = $ACTIVATION_OUTPUT.Handle
+    # Cache the handle so exit code works properly
+    # https://stackoverflow.com/questions/10262231/obtaining-exitcode-using-start-process-and-waitforexit-instead-of-wait
+    $unityHandle = $ACTIVATION_OUTPUT.Handle
 
-  while ($true) {
+    while ($true) {
       if ($ACTIVATION_OUTPUT.HasExited) {
         $ACTIVATION_EXIT_CODE = $ACTIVATION_OUTPUT.ExitCode
 
@@ -48,6 +51,15 @@ if ( ($null -ne ${env:UNITY_SERIAL}) -and ($null -ne ${env:UNITY_EMAIL}) -and ($
       }
 
       Start-Sleep -Seconds 3
+    }
+
+    if ($ACTIVATION_EXIT_CODE -eq 0) {
+      break
+    }
+    if ($ACTIVATION_ATTEMPT -lt $MAX_ACTIVATION_ATTEMPTS) {
+      Write-Output "Activation failed; waiting $ACTIVATION_RETRY_DELAY_SECONDS seconds for the Unity license cooldown before one bounded retry."
+      Start-Sleep -Seconds $ACTIVATION_RETRY_DELAY_SECONDS
+    }
   }
 }
 elseif( ($null -ne ${env:UNITY_LICENSING_SERVER}))
