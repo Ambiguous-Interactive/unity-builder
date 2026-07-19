@@ -10,17 +10,19 @@ permissions:
   checks: write
   statuses: write
 
-env:
-  CODECOV_TOKEN: '2f2eb890-30e2-4724-83eb-7633832cf0de'
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Same-run artifact actions use the workflow artifact runtime; keep GITHUB_TOKEN scopes minimal.
   tests:
     name: Tests
     runs-on: ubuntu-latest
+    outputs:
+      coverage-artifact-id: ${{ steps.coverage-artifact.outputs.artifact-id }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Install package manager (from package.json)
@@ -49,13 +51,73 @@ jobs:
           case "$(yarn --version)" in 1.*) echo 'expected up-to-date yarn version'; exit 1 ;; esac
           yarn install --immutable
       - run: yarn lint
+      - run: yarn test:workflow-policy
       - run: node scripts/verify-resource-cleanup-contract.mjs .
       - run: yarn test:ci --coverage
-      - run: bash <(curl -s https://codecov.io/bash)
+      - name: Preserve coverage for isolated upload
+        id: coverage-artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-report
+          path: ./coverage/lcov.info
+          if-no-files-found: error
+          retention-days: 1
       - name: Verify generated distribution
         run: |
           yarn build || { echo "build command should always succeed"; exit 61; }
           git diff --exit-code -- dist || { echo "generated dist is stale"; exit 62; }
+
+  upload-trusted-coverage:
+    name: Upload trusted coverage
+    if: >-
+      always() && needs.tests.outputs.coverage-artifact-id != '' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'))
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download coverage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-report
+          path: coverage
+      - name: Upload coverage to Codecov with OIDC
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: ./coverage/lcov.info
+          use_oidc: true
+
+  upload-tokenless-pr-coverage:
+    name: Upload fork and Dependabot coverage without a token
+    if: >-
+      always() && needs.tests.outputs.coverage-artifact-id != '' &&
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.head.repo.full_name != github.repository ||
+      github.event.pull_request.user.login == 'dependabot[bot]')
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download coverage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-report
+          path: coverage
+      - name: Upload unprotected fork or Dependabot coverage without a token
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: ./coverage/lcov.info
+          override_branch: pr${{ github.event.pull_request.number }}:${{ github.event.pull_request.head.ref }}
+          use_oidc: false
 
   orchestrator-integration:
     name: Orchestrator Integration
