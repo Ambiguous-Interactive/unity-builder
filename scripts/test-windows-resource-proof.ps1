@@ -65,11 +65,12 @@ if ($buildIndex -lt 0 -or $cleanupIndex -le $buildIndex -or $exitIndex -le $clea
 
 $classifier = Join-Path $PSScriptRoot 'classify-build-resource-proof.ps1'
 $classificationCases = @(
-    @{ Name = 'no attempt'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Expected = 'false' },
-    @{ Name = 'confirmed success'; Outcomes = @('success', 'skipped', 'skipped'); Proofs = @('true', '', ''); Expected = 'true' },
-    @{ Name = 'confirmed failed builds'; Outcomes = @('failure', 'failure', 'skipped'); Proofs = @('true', 'true', ''); Expected = 'true' },
-    @{ Name = 'failed return'; Outcomes = @('failure', 'skipped', 'skipped'); Proofs = @('false', '', ''); Expected = 'false' },
-    @{ Name = 'cancel after safe attempt'; Outcomes = @('failure', 'cancelled', 'skipped'); Proofs = @('true', '', ''); Expected = 'false' }
+    @{ Name = 'no attempt'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'skipped'; ExpectedSafe = 'false'; ExpectedReason = 'no-activation-proof' },
+    @{ Name = 'stale after admission'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'failure'; ExpectedSafe = 'true'; ExpectedReason = 'no-activation-current-head-rejected' },
+    @{ Name = 'confirmed success'; Outcomes = @('success', 'skipped', 'skipped'); Proofs = @('true', '', ''); Guard = 'success'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
+    @{ Name = 'confirmed failed builds'; Outcomes = @('failure', 'failure', 'skipped'); Proofs = @('true', 'true', ''); Guard = 'success'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
+    @{ Name = 'failed return'; Outcomes = @('failure', 'skipped', 'skipped'); Proofs = @('false', '', ''); Guard = 'success'; ExpectedSafe = 'false'; ExpectedReason = 'return-missing-positive-evidence' },
+    @{ Name = 'cancel after safe attempt'; Outcomes = @('failure', 'cancelled', 'skipped'); Proofs = @('true', '', ''); Guard = 'success'; ExpectedSafe = 'false'; ExpectedReason = 'return-missing-positive-evidence' }
 )
 foreach ($case in $classificationCases) {
     $outputPath = Join-Path ([System.IO.Path]::GetTempPath()) ("resource-proof-{0}.txt" -f [guid]::NewGuid())
@@ -79,15 +80,81 @@ foreach ($case in $classificationCases) {
             [Environment]::SetEnvironmentVariable("BUILD_${attempt}_OUTCOME", $case.Outcomes[$attempt - 1])
             [Environment]::SetEnvironmentVariable("BUILD_${attempt}_RESOURCE_SAFE", $case.Proofs[$attempt - 1])
         }
+        $env:POST_ACQUIRE_HEAD_OUTCOME = $case.Guard
         & $classifier
-        $actual = (Get-Content -LiteralPath $outputPath | Select-Object -Last 1) -replace '^resource-safe=', ''
-        if ($actual -ne $case.Expected) {
-            throw "Classifier case '$($case.Name)' expected $($case.Expected), got $actual."
+        $actual = @{}
+        foreach ($line in Get-Content -LiteralPath $outputPath) {
+            $name, $value = $line -split '=', 2
+            $actual[$name] = $value
+        }
+        if ($actual['resource-safe'] -ne $case.ExpectedSafe -or
+            $actual['resource-reason'] -ne $case.ExpectedReason) {
+            throw "Classifier case '$($case.Name)' expected $($case.ExpectedSafe)/$($case.ExpectedReason), got $($actual['resource-safe'])/$($actual['resource-reason'])."
         }
     }
     finally {
         Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
     }
+}
+
+$activationScript = Join-Path $PSScriptRoot '..\dist\platforms\windows\activate.ps1'
+$activationTokens = $null
+$activationParseErrors = $null
+[System.Management.Automation.Language.Parser]::ParseFile(
+    $activationScript,
+    [ref]$activationTokens,
+    [ref]$activationParseErrors
+) | Out-Null
+if ($activationParseErrors.Count -ne 0) {
+    throw "Windows activation script has parse errors: $($activationParseErrors.Message -join '; ')"
+}
+
+$activationCases = @(
+    @{ Name = 'first attempt succeeds'; ExitCodes = @(0); ExpectedStarts = 1; ExpectedSleeps = @(); ExpectedExit = 0 },
+    @{ Name = 'cooldown retry succeeds'; ExitCodes = @(1, 0); ExpectedStarts = 2; ExpectedSleeps = @(360); ExpectedExit = 0 },
+    @{ Name = 'bounded retry fails'; ExitCodes = @(1, 1); ExpectedStarts = 2; ExpectedSleeps = @(360); ExpectedExit = 1 }
+)
+$savedSerial = $env:UNITY_SERIAL
+$savedEmail = $env:UNITY_EMAIL
+$savedPassword = $env:UNITY_PASSWORD
+$savedUnityPath = $env:UNITY_PATH
+try {
+    $env:UNITY_SERIAL = 'synthetic-serial'
+    $env:UNITY_EMAIL = 'synthetic@example.invalid'
+    $env:UNITY_PASSWORD = 'synthetic-password'
+    $env:UNITY_PATH = 'C:\synthetic-unity'
+
+    foreach ($case in $activationCases) {
+        $script:activationExitCodes = $case.ExitCodes
+        $script:activationStartCount = 0
+        $script:activationSleeps = @()
+        function Start-Process {
+            param($FilePath, [switch]$NoNewWindow, [switch]$PassThru, $ArgumentList)
+            $exitCode = $script:activationExitCodes[$script:activationStartCount]
+            $script:activationStartCount++
+            [pscustomobject]@{ Handle = 1; HasExited = $true; ExitCode = $exitCode }
+        }
+        function Start-Sleep {
+            param([int]$Seconds)
+            $script:activationSleeps += $Seconds
+        }
+
+        . $activationScript
+
+        if ($script:activationStartCount -ne $case.ExpectedStarts -or
+            $ACTIVATION_EXIT_CODE -ne $case.ExpectedExit -or
+            (Compare-Object $script:activationSleeps $case.ExpectedSleeps)) {
+            throw "Activation case '$($case.Name)' violated bounded cooldown retry semantics."
+        }
+    }
+}
+finally {
+    Remove-Item Function:\Start-Process -ErrorAction SilentlyContinue
+    Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
+    $env:UNITY_SERIAL = $savedSerial
+    $env:UNITY_EMAIL = $savedEmail
+    $env:UNITY_PASSWORD = $savedPassword
+    $env:UNITY_PATH = $savedUnityPath
 }
 
 Write-Host 'Windows resource cleanup proof AST contract passed.'
