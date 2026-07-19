@@ -64,9 +64,14 @@ if ($buildIndex -lt 0 -or $cleanupIndex -le $buildIndex -or $exitIndex -le $clea
 }
 
 $classifier = Join-Path $PSScriptRoot 'classify-build-resource-proof.ps1'
+$allowedResourceReasons = @(
+    'cleanup-confirmed',
+    'cleanup-evidence-unknown',
+    'return-missing-positive-evidence'
+)
 $classificationCases = @(
-    @{ Name = 'no attempt'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'skipped'; ExpectedSafe = 'false'; ExpectedReason = 'no-activation-proof' },
-    @{ Name = 'stale after admission'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'failure'; ExpectedSafe = 'true'; ExpectedReason = 'no-activation-current-head-rejected' },
+    @{ Name = 'no attempt'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'skipped'; ExpectedSafe = 'false'; ExpectedReason = 'cleanup-evidence-unknown' },
+    @{ Name = 'stale after admission'; Outcomes = @('skipped', 'skipped', 'skipped'); Proofs = @('', '', ''); Guard = 'failure'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
     @{ Name = 'confirmed success'; Outcomes = @('success', 'skipped', 'skipped'); Proofs = @('true', '', ''); Guard = 'success'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
     @{ Name = 'confirmed failed builds'; Outcomes = @('failure', 'failure', 'skipped'); Proofs = @('true', 'true', ''); Guard = 'success'; ExpectedSafe = 'true'; ExpectedReason = 'cleanup-confirmed' },
     @{ Name = 'failed return'; Outcomes = @('failure', 'skipped', 'skipped'); Proofs = @('false', '', ''); Guard = 'success'; ExpectedSafe = 'false'; ExpectedReason = 'return-missing-positive-evidence' },
@@ -90,6 +95,15 @@ foreach ($case in $classificationCases) {
         if ($actual['resource-safe'] -ne $case.ExpectedSafe -or
             $actual['resource-reason'] -ne $case.ExpectedReason) {
             throw "Classifier case '$($case.Name)' expected $($case.ExpectedSafe)/$($case.ExpectedReason), got $($actual['resource-safe'])/$($actual['resource-reason'])."
+        }
+        if ($actual['resource-reason'] -notin $allowedResourceReasons) {
+            throw "Classifier case '$($case.Name)' emitted a reason unsupported by pinned build-lock v1.8.3: $($actual['resource-reason'])."
+        }
+        if ($actual['resource-safe'] -eq 'true' -and $actual['resource-reason'] -ne 'cleanup-confirmed') {
+            throw "Classifier case '$($case.Name)' violated the confirmed healthy cleanup reason contract."
+        }
+        if ($actual['resource-safe'] -ne 'true' -and $actual['resource-reason'] -eq 'cleanup-confirmed') {
+            throw "Classifier case '$($case.Name)' used cleanup-confirmed without positive cleanup proof."
         }
     }
     finally {

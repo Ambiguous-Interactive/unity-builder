@@ -62,6 +62,19 @@ requireText(
   '[DateTime]::UtcNow.AddSeconds(120)',
 );
 requireText('RC010', 'dist/platforms/windows/return_license.ps1', '$RETURN_LICENSE_OUTPUT.Kill()');
+requireText('RC014', 'scripts/classify-build-resource-proof.ps1', "'cleanup-confirmed'");
+requireText('RC014', 'scripts/classify-build-resource-proof.ps1', "'cleanup-evidence-unknown'");
+requireText(
+  'RC014',
+  'scripts/classify-build-resource-proof.ps1',
+  "'return-missing-positive-evidence'",
+);
+const cleanupClassifier = read('scripts/classify-build-resource-proof.ps1');
+if (
+  cleanupClassifier.includes('no-activation-current-head-rejected') ||
+  cleanupClassifier.includes('no-activation-proof')
+)
+  failures.push('RC014: cleanup classifier must emit only pinned build-lock reason codes');
 requireText(
   'RC006',
   'src/model/resource-cleanup-proof.ts',
@@ -373,8 +386,7 @@ if (
   failures.push(
     'RC014: Windows canary must fail after release when lock ownership was not acquired',
   );
-const expectedRunnerId =
-  '${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}';
+const expectedRunnerId = '${{ runner.name }}';
 const expectedHolderSuffix = '${{ github.job }}-${{ strategy.job-index }}';
 if (
   [windowsStep('acquire-build-lock'), windowsRelease].some(
@@ -383,7 +395,9 @@ if (
       step?.with?.['holder-id-suffix'] !== expectedHolderSuffix,
   )
 )
-  failures.push('RC014: Windows acquire and release must use the same unique ephemeral identity');
+  failures.push(
+    'RC014: Windows acquire and release must use the same stable physical runner and unique holder identity',
+  );
 if (
   windowsRelease?.uses !==
     `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@${buildLockSha}` ||

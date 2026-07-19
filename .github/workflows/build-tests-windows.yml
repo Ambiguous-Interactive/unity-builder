@@ -199,7 +199,7 @@ jobs:
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
           # Each Docker activation is a distinct cleanup identity even when
           # multiple matrix legs reuse the same self-hosted machine.
-          runner-id: ${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}
+          runner-id: ${{ runner.name }}
           holder-id-suffix: ${{ github.job }}-${{ strategy.job-index }}
           timeout-minutes: '40'
           require-resource-lifecycle: 'true'
@@ -320,7 +320,7 @@ jobs:
         with:
           lock-name: wallstop-organization-builds
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
-          runner-id: ${{ runner.name }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ strategy.job-index }}
+          runner-id: ${{ runner.name }}
           holder-id-suffix: ${{ github.job }}-${{ strategy.job-index }}
           resource-cleanup-status: ${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && 'confirmed' || 'unknown' }}
           resource-health: healthy

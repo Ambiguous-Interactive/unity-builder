@@ -19,11 +19,11 @@ if ($attemptedBuilds -eq 0) {
         # The exact-head guard runs after lock admission and before the first
         # activation-owning action, so rejection here cannot leave a Unity seat.
         $resourceSafe = 'true'
-        $resourceReason = 'no-activation-current-head-rejected'
+        $resourceReason = 'cleanup-confirmed'
     }
     else {
         $resourceSafe = 'false'
-        $resourceReason = 'no-activation-proof'
+        $resourceReason = 'cleanup-evidence-unknown'
     }
 }
 elseif ($resourceSafe -ne 'true') {
