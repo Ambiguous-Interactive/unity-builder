@@ -15,9 +15,11 @@ foreach ($attempt in 1..3) {
 }
 
 if ($attemptedBuilds -eq 0) {
-    if ($env:POST_ACQUIRE_HEAD_OUTCOME -in @('failure', 'cancelled')) {
+    if ($env:POST_ACQUIRE_HEAD_OUTCOME -in @('failure', 'cancelled') -and
+        $env:QUARANTINE_RECOVERED -eq 'false') {
         # The exact-head guard runs after lock admission and before the first
-        # activation-owning action, so rejection here cannot leave a Unity seat.
+        # activation-owning action. Rejection is confirmed safe only when
+        # admission did not inherit an existing same-runner quarantine.
         $resourceSafe = 'true'
         $resourceReason = 'cleanup-confirmed'
     }
