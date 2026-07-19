@@ -4,6 +4,10 @@
 echo "Changing to \"$ACTIVATE_LICENSE_PATH\" directory."
 pushd "$ACTIVATE_LICENSE_PATH"
 
+UNITY_EDITOR="${UNITY_BUILDER_UNITY_EDITOR_PATH:-/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app/Contents/MacOS/Unity}"
+ACTIVATION_LOG="${UNITY_BUILDER_RESOURCE_ACTIVATION_LOG_PATH:-${TMPDIR:-/tmp}/unity-builder-activation.log}"
+rm -f -- "$ACTIVATION_LOG"
+
 if [[ -n "$UNITY_SERIAL" && -n "$UNITY_EMAIL" && -n "$UNITY_PASSWORD" ]]; then
   #
   # SERIAL LICENSE MODE
@@ -14,8 +18,8 @@ if [[ -n "$UNITY_SERIAL" && -n "$UNITY_EMAIL" && -n "$UNITY_PASSWORD" ]]; then
   echo "Requesting activation"
 
   # Activate license
-  /Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app/Contents/MacOS/Unity \
-    -logFile - \
+  "$UNITY_EDITOR" \
+    -logFile "$ACTIVATION_LOG" \
     -batchmode \
     -nographics \
     -quit \
@@ -76,7 +80,7 @@ if [ $UNITY_EXIT_CODE -eq 0 ]; then
   echo "Activation complete."
 else
   # Activation failed so exit with the code from the license verification step
-  echo "Unclassified error occured while trying to activate license."
+  echo "Unity license activation failed; private evidence will be classified without printing it."
   echo "Exit code was: $UNITY_EXIT_CODE"
   echo "::error ::There was an error while trying to activate the Unity license."
   exit $UNITY_EXIT_CODE

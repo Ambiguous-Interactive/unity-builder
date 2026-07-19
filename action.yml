@@ -181,8 +181,7 @@ inputs:
   linux64RemoveExecutableExtension:
     default: 'false'
     required: false
-    description:
-      'When building for StandaloneLinux64, remove the default file extension of `.x86_64`. Set to true to restore the extensionless behavior from v4.'
+    description: 'When building for StandaloneLinux64, remove the default file extension of `.x86_64`. Set to true to restore the extensionless behavior from v4.'
 
 outputs:
   volume:
@@ -198,8 +197,16 @@ outputs:
       build step.'
   resourceSafe:
     description: >-
-      true only when the Windows activation-owning container completed Unity's
-      license return successfully. false on other platforms or uncertain cleanup.
+      true only when the activation-owning Windows container or native macOS
+      process produced exact current-attempt Unity cleanup proof.
+  resourceCleanupStatus:
+    description: 'confirmed only for exact positive Unity return evidence; otherwise unknown.'
+  resourceHealth:
+    description: 'blocked only for exact Unity account-limit 20111 evidence; otherwise healthy.'
+  resourceReason:
+    description: 'Allowlisted schema-5 cleanup/account-health reason code.'
+  resourceEvidenceDigest:
+    description: 'SHA-256 digest of private return and activation evidence; raw logs are not uploaded.'
 branding:
   icon: 'box'
   color: 'gray-dark'

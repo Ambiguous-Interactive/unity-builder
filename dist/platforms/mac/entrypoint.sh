@@ -1,11 +1,33 @@
 #!/usr/bin/env bash
 
-#
-# Perform Activation
-#
+# Keep license return on this same runner for every normal shell exit, including
+# activation/build failure and cancellation. The lock action's post step remains
+# the fail-closed backstop for hard runner loss.
+ACTIVATE_LICENSE_PATH=''
+activation_attempted=false
+cleanup_started=false
+
+cleanup_license() {
+  local original_exit_code=$?
+  trap - EXIT INT TERM
+
+  if [[ "$activation_attempted" == true && "$cleanup_started" == false ]]; then
+    cleanup_started=true
+    source "$ACTION_FOLDER/platforms/mac/steps/return_license.sh" || true
+  fi
+  if [[ -n "$ACTIVATE_LICENSE_PATH" ]]; then
+    rm -rf -- "$ACTIVATE_LICENSE_PATH"
+  fi
+
+  exit "$original_exit_code"
+}
+
+trap cleanup_license EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [ "$SKIP_ACTIVATION" != "true" ]; then
-  UNITY_LICENSE_PATH="/Library/Application Support/Unity"
+  UNITY_LICENSE_PATH="${UNITY_LICENSE_PATH:-/Library/Application Support/Unity}"
 
   if [ ! -d "$UNITY_LICENSE_PATH" ]; then
     echo "Creating Unity License Directory"
@@ -16,7 +38,8 @@ if [ "$SKIP_ACTIVATION" != "true" ]; then
   ACTIVATE_LICENSE_PATH="$ACTION_FOLDER/BlankProject"
   mkdir -p "$ACTIVATE_LICENSE_PATH"
 
-  source $ACTION_FOLDER/platforms/mac/steps/activate.sh
+  activation_attempted=true
+  source "$ACTION_FOLDER/platforms/mac/steps/activate.sh"
 else
   echo "Skipping activation"
 fi
@@ -25,16 +48,7 @@ fi
 # Run Build
 #
 
-source $ACTION_FOLDER/platforms/mac/steps/build.sh
-
-#
-# License Cleanup
-#
-
-if [ "$SKIP_ACTIVATION" != "true" ]; then
-  source $ACTION_FOLDER/platforms/mac/steps/return_license.sh
-  rm -r "$ACTIVATE_LICENSE_PATH"
-fi
+source "$ACTION_FOLDER/platforms/mac/steps/build.sh"
 
 #
 # Instructions for debugging
@@ -57,4 +71,4 @@ fi;
 # Exit with code from the build step.
 #
 
-exit $BUILD_EXIT_CODE
+exit "$BUILD_EXIT_CODE"

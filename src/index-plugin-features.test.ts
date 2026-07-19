@@ -64,6 +64,7 @@ vi.mock('./model', () => ({
     setAndroidVersionCode: vi.fn().mockResolvedValue(''),
     setEngineExitCode: vi.fn().mockResolvedValue(''),
     setResourceSafe: vi.fn().mockResolvedValue(''),
+    setResourceEvidence: vi.fn().mockResolvedValue(''),
   },
   ResourceCleanupProof: {
     begin: vi.fn().mockReturnValue({
@@ -71,7 +72,13 @@ vi.mock('./model', () => ({
       filePath: '/proof/current/proof',
       nonce: 'current-nonce',
     }),
-    consume: vi.fn().mockReturnValue(true),
+    consume: vi.fn().mockReturnValue({
+      resourceSafe: true,
+      cleanupStatus: 'confirmed',
+      health: 'healthy',
+      reason: 'cleanup-confirmed',
+      digest: 'a'.repeat(64),
+    }),
   },
 }));
 
@@ -159,7 +166,13 @@ describe('index.ts plugin lifecycle wiring', () => {
         nonce: 'current-nonce',
       });
       expect(Output.setResourceSafe).toHaveBeenNthCalledWith(1, false);
-      expect(Output.setResourceSafe).toHaveBeenNthCalledWith(2, true);
+      expect(Output.setResourceEvidence).toHaveBeenCalledWith({
+        resourceSafe: true,
+        cleanupStatus: 'confirmed',
+        health: 'healthy',
+        reason: 'cleanup-confirmed',
+        digest: 'a'.repeat(64),
+      });
     });
 
     it('consumes proof and remains unsafe when the Windows build throws', async () => {
@@ -171,8 +184,39 @@ describe('index.ts plugin lifecycle wiring', () => {
 
       expect(ResourceCleanupProof.consume).toHaveBeenCalledOnce();
       expect(Output.setResourceSafe).toHaveBeenNthCalledWith(1, false);
-      expect(Output.setResourceSafe).toHaveBeenNthCalledWith(2, false);
+      expect(Output.setResourceEvidence).toHaveBeenCalledWith({
+        resourceSafe: false,
+        cleanupStatus: 'confirmed',
+        health: 'healthy',
+        reason: 'cleanup-confirmed',
+        digest: 'a'.repeat(64),
+      });
       expect(core.setFailed).toHaveBeenCalledWith('simulated Docker failure');
+    });
+
+    it('publishes exact macOS cleanup and account-health evidence', async () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      const MacBuilder = (await import('./model/mac-builder')).default;
+      const { Output, ResourceCleanupProof } = await import('./model');
+      vi.mocked(ResourceCleanupProof.consume).mockReturnValueOnce({
+        resourceSafe: false,
+        cleanupStatus: 'unknown',
+        health: 'blocked',
+        reason: 'unity-account-limit-20111',
+        digest: 'b'.repeat(64),
+      });
+
+      await runIndex({ targetPlatform: 'StandaloneOSX' });
+
+      expect(ResourceCleanupProof.begin).toHaveBeenCalledWith('/runner-temp');
+      expect(MacBuilder.run).toHaveBeenCalledWith('/action');
+      expect(Output.setResourceEvidence).toHaveBeenCalledWith({
+        resourceSafe: false,
+        cleanupStatus: 'unknown',
+        health: 'blocked',
+        reason: 'unity-account-limit-20111',
+        digest: 'b'.repeat(64),
+      });
     });
 
     it('should call lifecycle hooks in order: initialize -> beforeLocalBuild -> [build] -> afterLocalBuild -> handlePostBuild', async () => {

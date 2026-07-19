@@ -108,6 +108,88 @@ requireOrder('RC011', 'dist/platforms/windows/entrypoint.ps1', [
 ]);
 requireText('RC012', 'dist/index.js', 'UNITY_BUILDER_RESOURCE_PROOF_NONCE');
 requireText('RC013', 'dist/index.js', 'resourceSafe');
+const actionManifest = parse(read('action.yml'));
+for (const output of [
+  'resourceSafe',
+  'resourceCleanupStatus',
+  'resourceHealth',
+  'resourceReason',
+  'resourceEvidenceDigest',
+]) {
+  if (!Object.hasOwn(actionManifest.outputs || {}, output))
+    failures.push(`RC020: action.yml is missing typed lifecycle output ${output}`);
+}
+requireText('RC020', 'src/index.ts', "process.platform === 'darwin'");
+requireText(
+  'RC020',
+  'dist/platforms/mac/steps/activate.sh',
+  'UNITY_BUILDER_RESOURCE_ACTIVATION_LOG_PATH',
+);
+requireText(
+  'RC020',
+  'dist/platforms/mac/steps/return_license.sh',
+  'UNITY_BUILDER_RESOURCE_RETURN_LOG_PATH',
+);
+requireText('RC020', 'dist/platforms/mac/steps/return_license.sh', 'RETURN_TIMEOUT_SECONDS');
+requireText('RC020', 'dist/platforms/mac/steps/return_license.sh', 'RETURN_KILL_GRACE_SECONDS');
+requireText('RC020', 'dist/platforms/mac/steps/return_license.sh', 'signal_return_tree KILL');
+requireText('RC020', 'dist/platforms/mac/steps/return_license.sh', 'completed:${return_exit_code}');
+requireOrder('RC020', 'dist/platforms/mac/entrypoint.sh', [
+  'trap cleanup_license EXIT',
+  'activation_attempted=true',
+  'source "$ACTION_FOLDER/platforms/mac/steps/activate.sh"',
+  'source "$ACTION_FOLDER/platforms/mac/steps/build.sh"',
+  'exit "$BUILD_EXIT_CODE"',
+]);
+requireText(
+  'RC020',
+  'dist/platforms/mac/steps/return_license.sh',
+  'Successfully returned the entitlement license',
+);
+requireText(
+  'RC020',
+  'dist/platforms/mac/steps/return_license.sh',
+  'Successfully returned ULF license with serial number',
+);
+if (
+  read('dist/platforms/mac/steps/activate.sh').includes('-logFile -') ||
+  read('dist/platforms/mac/steps/return_license.sh').includes('-logFile -')
+)
+  failures.push('RC020: macOS activation and return evidence must remain private');
+if (
+  !read('dist/platforms/mac/steps/return_license.sh').includes(
+    '"$return_exit_code" == 0 && "$entitlement_returned" == true && "$ulf_returned" == true',
+  ) ||
+  !read('src/model/resource-cleanup-proof.ts').includes(
+    "status.bytes.toString('utf8') === 'completed:0'",
+  ) ||
+  !read('src/model/resource-cleanup-proof.ts').includes('attempt.requiresNativeReturnEvidence')
+)
+  failures.push(
+    'RC020: native macOS proof must require a present exact log and completed zero exit status',
+  );
+const macReturnRuntime = read('dist/platforms/mac/steps/return_license.sh');
+if (
+  !macReturnRuntime.includes('snapshot_return_descendants') ||
+  !macReturnRuntime.includes('return_tree_alive') ||
+  !macReturnRuntime.includes('return_pgid=$return_pid') ||
+  !macReturnRuntime.includes('kill -"$signal" -- "-$return_pgid"') ||
+  !macReturnRuntime.includes('signal_return_tree TERM') ||
+  !macReturnRuntime.includes('signal_return_tree KILL') ||
+  !macReturnRuntime.includes('if ! return_tree_alive; then')
+)
+  failures.push(
+    'RC020: bounded macOS termination must track and kill descendants even after the Unity parent exits',
+  );
+const cleanupProofSource = read('src/model/resource-cleanup-proof.ts');
+if (
+  cleanupProofSource.includes('.update(returned.bytes)') ||
+  cleanupProofSource.includes('.update(activation.bytes)') ||
+  !cleanupProofSource.includes('.update(attempt.nonce)')
+)
+  failures.push(
+    'RC020: the public evidence digest must bind normalized classifications, never secret-bearing logs',
+  );
 
 const windowsWorkflow = parse(read('.github/workflows/build-tests-windows.yml'));
 const windowsMatrix = windowsWorkflow.jobs?.['matrix-config'];
@@ -506,6 +588,339 @@ if (runBashContractTests && aggregateStep?.run) {
   }
 }
 
+const macWorkflow = parse(read('.github/workflows/build-tests-mac.yml'));
+const macContract = macWorkflow.jobs?.['resource-cleanup-proof-contract'];
+const macCanary = macWorkflow.jobs?.boundedOrganizationMacOSCanary;
+const macUpstream = macWorkflow.jobs?.buildForAllPlatformsMacOS;
+const macAggregate = macWorkflow.jobs?.['macos-license-ci'];
+const macSteps = macCanary?.steps || [];
+const macStepIndex = (id) => macSteps.findIndex((step) => step.id === id);
+const macStep = (id) => macSteps.find((step) => step.id === id);
+const macMode = macWorkflow.on?.workflow_dispatch?.inputs?.mode;
+const expectedMacCondition =
+  "github.repository == 'Ambiguous-Interactive/unity-builder' && inputs.mode == 'smoke'";
+if (
+  Object.keys(macWorkflow.on || {}).join(',') !== 'workflow_dispatch' ||
+  JSON.stringify(macWorkflow.permissions) !== JSON.stringify({ contents: 'read' }) ||
+  macWorkflow.concurrency?.['cancel-in-progress'] !== false
+)
+  failures.push(
+    'RC020: macOS canary must remain manual, read-only, and immune to automatic cancellation',
+  );
+if (
+  macMode?.type !== 'choice' ||
+  macMode?.default !== 'contract-only' ||
+  JSON.stringify(macMode?.options) !== JSON.stringify(['contract-only', 'smoke', 'upstream-full'])
+)
+  failures.push(
+    'RC020: macOS dispatch must distinguish the unlicensed contract, bounded smoke, and upstream matrix',
+  );
+if (
+  macContract?.['runs-on'] !== 'macos-14' ||
+  macContract?.steps?.[0]?.uses !== 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' ||
+  macContract?.steps?.[1]?.run !== 'bash scripts/test-macos-resource-proof.sh'
+)
+  failures.push('RC020: macOS canary must run its platform cleanup fixtures first');
+if (
+  macUpstream?.if !==
+    "${{ github.repository == 'game-ci/unity-builder' && inputs.mode == 'upstream-full' }}" ||
+  macCanary?.if !== expectedMacCondition ||
+  macCanary?.['runs-on'] !== 'macos-14' ||
+  JSON.stringify(macCanary?.needs) !== JSON.stringify(['resource-cleanup-proof-contract']) ||
+  macCanary?.strategy?.matrix ||
+  macCanary?.env ||
+  macCanary?.permissions
+)
+  failures.push(
+    'RC020: organization macOS coverage must be one bounded hosted leg while upstream stays gated',
+  );
+const macAcquire = macStep('acquire-build-lock');
+const macBuild = macStep('build');
+const macReturn = macStep('return-license');
+const macRelease = macStep('release-build-lock');
+const macVerify = macStep('verify-cleanup');
+if (
+  macStepIndex('acquire-build-lock') < 0 ||
+  macStepIndex('build') !== macStepIndex('acquire-build-lock') + 1 ||
+  macStepIndex('return-license') !== macStepIndex('build') + 1 ||
+  macStepIndex('release-build-lock') !== macStepIndex('return-license') + 1 ||
+  macStepIndex('verify-cleanup') !== macStepIndex('release-build-lock') + 1
+)
+  failures.push(
+    'RC020: macOS must order acquire, one local build, same-runner return, release, and verification',
+  );
+if (
+  macAcquire?.uses !==
+    `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock-with-cleanup@${buildLockSha}` ||
+  macAcquire?.with?.['runner-id'] !== '${{ runner.name }}' ||
+  macAcquire?.with?.['holder-id-suffix'] !== '${{ github.job }}' ||
+  macAcquire?.with?.['require-resource-lifecycle'] !== 'true' ||
+  macAcquire?.with?.['minimum-release-cooldown-seconds'] !== '1' ||
+  macBuild?.uses !== './' ||
+  macBuild?.if !== "${{ steps.acquire-build-lock.outputs.acquired == 'true' }}" ||
+  macBuild?.['continue-on-error'] !== true ||
+  macBuild?.with?.unityVersion !== '2022.3.62f3' ||
+  macBuild?.with?.targetPlatform !== 'StandaloneOSX'
+)
+  failures.push('RC020: macOS smoke must bind one reviewed build to lifecycle-aware ownership');
+if (
+  macReturn?.if !==
+    "${{ always() && steps.acquire-build-lock.outputs.acquired == 'true' && steps.build.outputs.resourceCleanupStatus != 'confirmed' }}" ||
+  macReturn?.['continue-on-error'] !== true ||
+  macReturn?.['timeout-minutes'] !== 5 ||
+  !macReturn?.run?.includes('dist/platforms/mac/steps/return_license.sh') ||
+  !macReturn?.run?.includes('completed:0') ||
+  !macReturn?.run?.includes('UNITY_BUILDER_RESOURCE_PROOF_NONCE') ||
+  !macReturn?.run?.includes('UNITY_BUILDER_RESOURCE_PROOF_PATH') ||
+  !macReturn?.run?.includes('resource-safe=${fallback_nonce}') ||
+  !macReturn?.run?.includes('uuidgen')
+)
+  failures.push(
+    'RC020: macOS smoke must schedule an independently bounded same-runner Unity return under always()',
+  );
+const macStepBudgets = macSteps.map((step) => step?.['timeout-minutes']);
+if (
+  macStepBudgets.some((budget) => !Number.isInteger(budget) || budget <= 0) ||
+  macCanary?.['timeout-minutes'] < macStepBudgets.reduce((sum, budget) => sum + budget, 0) + 20
+)
+  failures.push(
+    'RC020: macOS job timeout must reserve at least twenty minutes beyond every bounded lifecycle step',
+  );
+const macBuildSecrets = Object.keys(macBuild?.env || {}).sort();
+const macReturnSecrets = Object.keys(macReturn?.env || {}).sort();
+if (
+  JSON.stringify(macBuildSecrets) !==
+    JSON.stringify(['UNITY_EMAIL', 'UNITY_LICENSE', 'UNITY_PASSWORD', 'UNITY_SERIAL']) ||
+  JSON.stringify(macReturnSecrets) !==
+    JSON.stringify(['UNITY_EMAIL', 'UNITY_PASSWORD', 'UNITY_SERIAL']) ||
+  macSteps.some(
+    (step) =>
+      step !== macAcquire &&
+      step !== macRelease &&
+      JSON.stringify(step).includes('BUILD_LOCK_APP_'),
+  ) ||
+  macSteps.some(
+    (step) =>
+      step !== macBuild && step !== macReturn && JSON.stringify(step).includes('secrets.UNITY_'),
+  )
+)
+  failures.push('RC020: macOS Unity and writer credentials must stay in their exact steps');
+if (
+  macRelease?.uses !==
+    `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@${buildLockSha}` ||
+  macRelease?.if !== '${{ always() }}' ||
+  macRelease?.with?.['runner-id'] !== '${{ runner.name }}' ||
+  macRelease?.with?.['holder-id-suffix'] !== '${{ github.job }}' ||
+  macRelease?.with?.['holder-id'] !== '${{ steps.acquire-build-lock.outputs.holder-id }}' ||
+  macRelease?.with?.['resource-cleanup-status'] !==
+    "${{ steps.return-license.outputs.cleanup-status || steps.build.outputs.resourceCleanupStatus || 'unknown' }}" ||
+  macRelease?.with?.['resource-health'] !==
+    "${{ (steps.acquire-build-lock.outputs.resource-health == 'blocked' || steps.build.outputs.resourceHealth == 'blocked' || steps.return-license.outputs.resource-health == 'blocked') && 'blocked' || 'healthy' }}" ||
+  macRelease?.with?.['resource-reason'] !==
+    "${{ (steps.acquire-build-lock.outputs.resource-health == 'blocked' || steps.build.outputs.resourceHealth == 'blocked' || steps.return-license.outputs.resource-health == 'blocked') && 'unity-account-limit-20111' || steps.return-license.outputs.resource-reason || steps.build.outputs.resourceReason || steps.acquire-build-lock.outputs.resource-reason || 'cleanup-evidence-unknown' }}"
+)
+  failures.push('RC020: macOS release must forward the exact typed schema-5 evidence tuple');
+if (
+  macVerify?.if !== '${{ always() }}' ||
+  macVerify?.env?.CLEANUP_STATUS !==
+    '${{ steps.return-license.outputs.cleanup-status || steps.build.outputs.resourceCleanupStatus }}' ||
+  macVerify?.env?.EVIDENCE_DIGEST !==
+    '${{ steps.return-license.outputs.evidence-digest || steps.build.outputs.resourceEvidenceDigest }}' ||
+  macVerify?.env?.RESOURCE_HEALTH !==
+    "${{ (steps.acquire-build-lock.outputs.resource-health == 'blocked' || steps.build.outputs.resourceHealth == 'blocked' || steps.return-license.outputs.resource-health == 'blocked') && 'blocked' || 'healthy' }}" ||
+  macVerify?.env?.RESOURCE_REASON !==
+    "${{ (steps.acquire-build-lock.outputs.resource-health == 'blocked' || steps.build.outputs.resourceHealth == 'blocked' || steps.return-license.outputs.resource-health == 'blocked') && 'unity-account-limit-20111' || steps.return-license.outputs.resource-reason || steps.build.outputs.resourceReason || steps.acquire-build-lock.outputs.resource-reason }}" ||
+  macVerify?.env?.RELEASED !== '${{ steps.release-build-lock.outputs.released }}' ||
+  macVerify?.env?.RELEASE_CLEANUP_RESULT !==
+    '${{ steps.release-build-lock.outputs.cleanup-result }}' ||
+  macVerify?.env?.RELEASE_RESERVATION_STATE !==
+    '${{ steps.release-build-lock.outputs.reservation-state }}' ||
+  !macVerify?.run?.includes('unity-account-limit-20111') ||
+  !macVerify?.run?.includes('cleanup-confirmed') ||
+  !macVerify?.run?.includes('cooldown-started') ||
+  !macVerify?.run?.includes('RELEASE_HOLDER_ID') ||
+  !macVerify?.run?.includes('RELEASE_AVAILABLE_AT') ||
+  !macVerify?.run?.includes('^[0-9a-f]{64}$') ||
+  macVerify?.run?.includes('RELEASE_HELD_BY')
+)
+  failures.push('RC020: macOS verification must fail closed on build, cleanup, or account health');
+const macVerifyScript = macVerify?.run;
+if (runBashContractTests && macVerifyScript) {
+  const holder =
+    'Ambiguous-Interactive/unity-builder:123:boundedOrganizationMacOSCanary:boundedOrganizationMacOSCanary';
+  const verifyCases = [
+    ['exact successful release', {}, 0],
+    [
+      'blocked account',
+      { RESOURCE_HEALTH: 'blocked', RESOURCE_REASON: 'unity-account-limit-20111' },
+      1,
+    ],
+    ['failed build', { BUILD_OUTCOME: 'failure' }, 1],
+    ['nonzero or missing return evidence', { CLEANUP_STATUS: 'unknown' }, 1],
+    ['release step failure', { RELEASE_OUTCOME: 'failure' }, 1],
+    ['holder not removed', { RELEASED: 'false' }, 1],
+    ['cooldown not started', { RELEASE_CLEANUP_RESULT: 'released' }, 1],
+    ['holder identity mismatch', { RELEASE_HOLDER_ID: `${holder}-other` }, 1],
+    ['another holder remains', { RELEASE_HELD_BY: `${holder}-other-run` }, 0],
+    ['missing cooldown timestamp', { RELEASE_AVAILABLE_AT: '' }, 1],
+    ['malformed digest', { EVIDENCE_DIGEST: 'not-a-digest' }, 1],
+  ];
+  const validEnvironment = {
+    ACQUIRED: 'true',
+    BUILD_OUTCOME: 'success',
+    CLEANUP_STATUS: 'confirmed',
+    EVIDENCE_DIGEST: 'a'.repeat(64),
+    ACQUIRE_HOLDER_ID: holder,
+    RELEASE_AVAILABLE_AT: '2026-07-19T12:00:00.000Z',
+    RELEASE_CLEANUP_RESULT: 'cooldown-started',
+    RELEASE_HELD_BY: '',
+    RELEASE_HOLDER_ID: holder,
+    RELEASE_OUTCOME: 'success',
+    RELEASED: 'true',
+    RELEASE_RESERVATION_STATE: 'cooldown',
+    RESOURCE_HEALTH: 'healthy',
+    RESOURCE_REASON: 'cleanup-confirmed',
+  };
+  for (const [name, overrides, expected] of verifyCases) {
+    const result = spawnSync('bash', ['-c', macVerifyScript], {
+      env: { ...process.env, ...validEnvironment, ...overrides },
+      encoding: 'utf8',
+    });
+    if (result.status !== expected)
+      failures.push(
+        `RC020: macOS verification case ${name} expected ${expected}, got ${result.status}: ${result.stdout}${result.stderr}`,
+      );
+  }
+}
+if (
+  macAggregate?.if !== '${{ always() }}' ||
+  JSON.stringify(macAggregate?.needs) !==
+    JSON.stringify([
+      'resource-cleanup-proof-contract',
+      'boundedOrganizationMacOSCanary',
+      'buildForAllPlatformsMacOS',
+    ]) ||
+  !macAggregate?.steps?.[0]?.run?.includes('No licensed macOS coverage was requested')
+)
+  failures.push('RC020: macOS workflow needs one stable always-reporting aggregate');
+const macAggregateScript = macAggregate?.steps?.[0]?.run;
+if (runBashContractTests && macAggregateScript) {
+  const aggregateCases = [
+    [
+      'organization contract',
+      'Ambiguous-Interactive/unity-builder',
+      'contract-only',
+      'skipped',
+      'success',
+      'skipped',
+      0,
+    ],
+    [
+      'organization smoke',
+      'Ambiguous-Interactive/unity-builder',
+      'smoke',
+      'success',
+      'success',
+      'skipped',
+      0,
+    ],
+    [
+      'skipped required smoke',
+      'Ambiguous-Interactive/unity-builder',
+      'smoke',
+      'skipped',
+      'success',
+      'skipped',
+      1,
+    ],
+    [
+      'failed required smoke',
+      'Ambiguous-Interactive/unity-builder',
+      'smoke',
+      'failure',
+      'success',
+      'skipped',
+      1,
+    ],
+    [
+      'cancelled required smoke',
+      'Ambiguous-Interactive/unity-builder',
+      'smoke',
+      'cancelled',
+      'success',
+      'skipped',
+      1,
+    ],
+    [
+      'failed cleanup contract',
+      'Ambiguous-Interactive/unity-builder',
+      'contract-only',
+      'skipped',
+      'failure',
+      'skipped',
+      1,
+    ],
+    [
+      'upstream full matrix',
+      'game-ci/unity-builder',
+      'upstream-full',
+      'skipped',
+      'success',
+      'success',
+      0,
+    ],
+    [
+      'failed upstream matrix',
+      'game-ci/unity-builder',
+      'upstream-full',
+      'skipped',
+      'success',
+      'failure',
+      1,
+    ],
+    [
+      'upstream contract skips licensed matrix',
+      'game-ci/unity-builder',
+      'contract-only',
+      'skipped',
+      'success',
+      'skipped',
+      0,
+    ],
+    ['unenrolled repository', 'example/fork', 'contract-only', 'skipped', 'success', 'skipped', 1],
+  ];
+  for (const [name, repository, mode, canary, contract, upstream, expected] of aggregateCases) {
+    const result = spawnSync('bash', ['-c', macAggregateScript], {
+      env: {
+        ...process.env,
+        REPOSITORY: repository,
+        MODE: mode,
+        CANARY_RESULT: canary,
+        CONTRACT_RESULT: contract,
+        UPSTREAM_RESULT: upstream,
+      },
+      encoding: 'utf8',
+    });
+    if (
+      result.status !== expected ||
+      (name === 'organization contract' &&
+        !result.stdout.includes('cleanup contract fixtures passed'))
+    )
+      failures.push(
+        `RC020: macOS aggregate case ${name} expected ${expected}, got ${result.status}: ${result.stdout}${result.stderr}`,
+      );
+  }
+}
+if (
+  JSON.stringify(
+    macSteps.filter((step) => String(step.uses || '').startsWith('actions/upload-artifact@')),
+  ).includes('runner.temp') ||
+  JSON.stringify(
+    macSteps.filter((step) => String(step.uses || '').startsWith('actions/upload-artifact@')),
+  ).includes('unity-builder-fallback-return')
+)
+  failures.push('RC020: private macOS return evidence must never be uploaded');
+
 const upstreamSync = read('.github/workflows/upstream-sync.yml');
 const verifierCopies =
   upstreamSync.match(/cp .*verify-resource-cleanup-contract\.mjs .*verify\.mjs/g) || [];
@@ -524,9 +939,12 @@ for (const [platform, file, jobName] of [
     failures.push(`RC014: ${platform} build workflow must not run automatically in the fork`);
   if (
     platform === 'macOS' &&
-    workflow.jobs?.[jobName]?.if !== "${{ github.repository == 'game-ci/unity-builder' }}"
+    workflow.jobs?.[jobName]?.if !==
+      "${{ github.repository == 'game-ci/unity-builder' && inputs.mode == 'upstream-full' }}"
   )
-    failures.push('RC014: paid-license macOS builds must stay disabled in the fork');
+    failures.push(
+      'RC014: the upstream paid-license macOS matrix must stay disabled in the organization fork',
+    );
   if (platform === 'Ubuntu' && JSON.stringify(workflow).includes('UNITY_SERIAL'))
     failures.push('RC014: Ubuntu Personal-license workflow must not join the paid serial pool');
   if (platform === 'Ubuntu' && JSON.stringify(workflow).includes('secrets.UNITY_'))
@@ -679,4 +1097,4 @@ if (failures.length) {
   console.error(failures.join('\n'));
   process.exit(1);
 }
-console.log('Resource cleanup contract verified (RC001-RC019).');
+console.log('Resource cleanup contract verified (RC001-RC020).');
