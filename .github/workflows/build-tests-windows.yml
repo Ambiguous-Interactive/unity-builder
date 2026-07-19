@@ -323,9 +323,9 @@ jobs:
           lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
           runner-id: ${{ runner.name }}
           holder-id-suffix: ${{ github.job }}-${{ strategy.job-index }}
-          resource-cleanup-status: ${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'confirmed' || 'unknown' }}
+          resource-cleanup-status: ${{ (steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'confirmed') || 'unknown' }}
           resource-health: healthy
-          resource-reason: ${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'cleanup-confirmed' || steps.cleanup-proof.outputs['resource-reason'] == 'return-missing-positive-evidence' && 'return-missing-positive-evidence' || 'cleanup-evidence-unknown' }}
+          resource-reason: ${{ (steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'cleanup-confirmed') || (steps.cleanup-proof.outputs['resource-reason'] == 'return-missing-positive-evidence' && 'return-missing-positive-evidence') || 'cleanup-evidence-unknown' }}
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
           BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}

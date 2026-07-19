@@ -416,10 +416,10 @@ if (
     `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@${buildLockSha}` ||
   windowsRelease?.if !== expectedReleaseCondition ||
   windowsRelease?.with?.['resource-cleanup-status'] !==
-    "${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'confirmed' || 'unknown' }}" ||
+    "${{ (steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'confirmed') || 'unknown' }}" ||
   windowsRelease?.with?.['resource-health'] !== 'healthy' ||
   windowsRelease?.with?.['resource-reason'] !==
-    "${{ steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'cleanup-confirmed' || steps.cleanup-proof.outputs['resource-reason'] == 'return-missing-positive-evidence' && 'return-missing-positive-evidence' || 'cleanup-evidence-unknown' }}" ||
+    "${{ (steps.cleanup-proof.outputs['resource-safe'] == 'true' && steps.cleanup-proof.outputs['resource-reason'] == 'cleanup-confirmed' && 'cleanup-confirmed') || (steps.cleanup-proof.outputs['resource-reason'] == 'return-missing-positive-evidence' && 'return-missing-positive-evidence') || 'cleanup-evidence-unknown' }}" ||
   Object.hasOwn(windowsRelease?.with || {}, 'resource-safe')
 )
   failures.push('RC014: Windows release must report typed schema-5 cleanup evidence');
