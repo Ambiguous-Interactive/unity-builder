@@ -75,7 +75,7 @@ jobs:
           holder-id-suffix: ${{ github.job }}
           timeout-minutes: '40'
           require-resource-lifecycle: 'true'
-          minimum-release-cooldown-seconds: '360'
+          minimum-release-cooldown-seconds: '1'
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
           BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}

@@ -160,9 +160,7 @@ if (
   !read('dist/platforms/mac/steps/return_license.sh').includes(
     '"$return_exit_code" == 0 && "$entitlement_returned" == true && "$ulf_returned" == true',
   ) ||
-  !read('src/model/resource-cleanup-proof.ts').includes(
-    "returnStatus === 'completed:0'",
-  ) ||
+  !read('src/model/resource-cleanup-proof.ts').includes("returnStatus === 'completed:0'") ||
   !read('src/model/resource-cleanup-proof.ts').includes('attempt.requiresNativeReturnEvidence')
 )
   failures.push(
@@ -668,7 +666,7 @@ if (
   macAcquire?.with?.['runner-id'] !== '${{ runner.name }}' ||
   macAcquire?.with?.['holder-id-suffix'] !== '${{ github.job }}' ||
   macAcquire?.with?.['require-resource-lifecycle'] !== 'true' ||
-  macAcquire?.with?.['minimum-release-cooldown-seconds'] !== '360' ||
+  macAcquire?.with?.['minimum-release-cooldown-seconds'] !== '1' ||
   macBuild?.uses !== './' ||
   macBuild?.if !== "${{ steps.acquire-build-lock.outputs.acquired == 'true' }}" ||
   macBuild?.['continue-on-error'] !== true ||
