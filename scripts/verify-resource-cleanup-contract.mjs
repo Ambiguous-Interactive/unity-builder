@@ -161,7 +161,7 @@ if (
     '"$return_exit_code" == 0 && "$entitlement_returned" == true && "$ulf_returned" == true',
   ) ||
   !read('src/model/resource-cleanup-proof.ts').includes(
-    "status.bytes.toString('utf8') === 'completed:0'",
+    "returnStatus === 'completed:0'",
   ) ||
   !read('src/model/resource-cleanup-proof.ts').includes('attempt.requiresNativeReturnEvidence')
 )

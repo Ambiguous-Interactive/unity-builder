@@ -62,7 +62,7 @@ describe('ResourceCleanupProof', () => {
       returned:
         'Successfully returned the entitlement license\n' +
         '[Licensing::Client] Successfully returned ULF license with serial number: masked\n',
-      status: 'completed:0',
+      status: 'completed:0\n',
       proof: true,
       expected: {
         resourceSafe: true,

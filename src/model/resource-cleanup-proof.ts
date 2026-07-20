@@ -262,7 +262,7 @@ class ResourceCleanupProof {
     } else if (
       proofSafe &&
       (attempt.requiresNativeReturnEvidence
-        ? returned.present && status.bytes.toString('utf8') === 'completed:0' && exactReturn
+        ? returned.present && returnStatus === 'completed:0' && exactReturn
         : !returned.present || exactReturn)
     ) {
       evidence = {
