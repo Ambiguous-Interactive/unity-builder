@@ -1,14 +1,237 @@
-name: Builds - MacOS
+name: Builds - macOS
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run the cleanup contract, one organization smoke, or the upstream full matrix.'
+        required: true
+        default: contract-only
+        type: choice
+        options:
+          - contract-only
+          - smoke
+          - upstream-full
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
+  resource-cleanup-proof-contract:
+    name: macOS resource cleanup proof contract
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Exercise private return evidence fixtures
+        run: bash scripts/test-macos-resource-proof.sh
+
+  boundedOrganizationMacOSCanary:
+    name: StandaloneOSX on 2022.3.62f3 (bounded organization canary)
+    if: github.repository == 'Ambiguous-Interactive/unity-builder' && inputs.mode == 'smoke'
+    needs: [resource-cleanup-proof-contract]
+    runs-on: macos-14
+    # Explicit step budgets total 144 minutes; keep a 21-minute job-level
+    # reserve so verification and post cleanup survive a near-budget build.
+    timeout-minutes: 165
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        timeout-minutes: 5
+        with:
+          lfs: true
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        timeout-minutes: 5
+        with:
+          path: test-project/Library
+          key: Library-test-project-macos-StandaloneOSX-2022.3.62f3
+          restore-keys: |
+            Library-test-project-macos-StandaloneOSX-
+            Library-test-project-macos-
+            Library-test-project-
+
+      - name: Set scripting backend to IL2CPP
+        timeout-minutes: 1
+        run: >-
+          mv -f ./test-project/ProjectSettings/ProjectSettingsIl2cpp.asset
+          ./test-project/ProjectSettings/ProjectSettings.asset
+
+      - name: Require isolated return-process support
+        id: return-isolation
+        timeout-minutes: 1
+        run: python3 -c 'import os; assert hasattr(os, "setsid")'
+
+      - name: Acquire organization Unity lock
+        id: acquire-build-lock
+        timeout-minutes: 45
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock-with-cleanup@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        with:
+          lock-name: wallstop-organization-builds
+          lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
+          runner-id: ${{ runner.name }}
+          holder-id-suffix: ${{ github.job }}
+          timeout-minutes: '40'
+          require-resource-lifecycle: 'true'
+          minimum-release-cooldown-seconds: '1'
+        env:
+          BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
+          BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}
+
+      - name: Build bounded macOS smoke
+        id: build
+        if: ${{ steps.acquire-build-lock.outputs.acquired == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 70
+        uses: ./
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+        with:
+          allowDirtyBuild: true
+          buildName: 'GameCI Test Build'
+          customParameters: -profile SomeProfile -someBoolean -someValue exampleValue
+          projectPath: test-project
+          targetPlatform: StandaloneOSX
+          unityVersion: 2022.3.62f3
+
+      - name: Return macOS Unity license on the same runner
+        id: return-license
+        if: ${{ always() && steps.acquire-build-lock.outputs.acquired == 'true' && steps.build.outputs.resourceCleanupStatus != 'confirmed' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+        run: |
+          set -euo pipefail
+          attempt="$(mktemp -d "${RUNNER_TEMP}/unity-builder-fallback-return.XXXXXX")"
+          trap 'rm -rf -- "${attempt}"' EXIT
+          mkdir -p "${attempt}/project"
+          export ACTION_FOLDER="${GITHUB_WORKSPACE}/dist"
+          export ACTIVATE_LICENSE_PATH="${attempt}/project"
+          export UNITY_VERSION=2022.3.62f3
+          export UNITY_LICENSING_SERVER=''
+          export UNITY_BUILDER_RESOURCE_RETURN_LOG_PATH="${attempt}/return.log"
+          export UNITY_BUILDER_RESOURCE_STATUS_PATH="${attempt}/return.status"
+          export UNITY_BUILDER_RETURN_TIMEOUT_SECONDS=180
+          export UNITY_BUILDER_RETURN_KILL_GRACE_SECONDS=10
+          fallback_nonce="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          export UNITY_BUILDER_RESOURCE_PROOF_NONCE="${fallback_nonce}"
+          export UNITY_BUILDER_RESOURCE_PROOF_PATH="${attempt}/proof"
+          source dist/platforms/mac/steps/return_license.sh
+
+          status="$(cat "${attempt}/return.status" 2>/dev/null || true)"
+          cleanup_status=unknown
+          resource_health=healthy
+          resource_reason=return-missing-positive-evidence
+          if awk 'BEGIN { found=0 } { line=tolower($0); if (line ~ /20111/ && line ~ /(licen[cs]|activation|entitlement)/ && line ~ /(error|fail|limit|maximum|blocked|return|code)/) found=1 } END { exit !found }' "${attempt}/return.log"; then
+            resource_health=blocked
+            resource_reason=unity-account-limit-20111
+          elif [[ "${status}" == completed:0 ]] &&
+            [[ "$(cat "${attempt}/proof" 2>/dev/null || true)" == "resource-safe=${fallback_nonce}" ]] &&
+            grep -Eq '^(\[Licensing::Module\] )?Successfully returned the entitlement license$' "${attempt}/return.log" &&
+            grep -Eq '^(Serial number unavailable for ULF return|\[Licensing::Client\] Successfully returned ULF license with serial number[[:space:]]*:[[:space:]]*[^[:space:]]+)$' "${attempt}/return.log"; then
+            cleanup_status=confirmed
+            resource_reason=cleanup-confirmed
+          elif [[ "${status}" == timeout ]]; then
+            resource_reason=return-timeout
+          elif [[ "${status}" == terminated ]]; then
+            resource_reason=return-terminated
+          fi
+          evidence_digest="$(printf '%s' "${fallback_nonce}:${status}:${cleanup_status}:${resource_health}:${resource_reason}" | shasum -a 256 | awk '{print $1}')"
+          {
+            echo "cleanup-status=${cleanup_status}"
+            echo "resource-health=${resource_health}"
+            echo "resource-reason=${resource_reason}"
+            echo "evidence-digest=${evidence_digest}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Release organization Unity lock
+        id: release-build-lock
+        if: ${{ always() }}
+        timeout-minutes: 5
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        with:
+          lock-name: wallstop-organization-builds
+          lock-repository: Ambiguous-Interactive/ambiguous-organization-build-lock
+          runner-id: ${{ runner.name }}
+          holder-id-suffix: ${{ github.job }}
+          holder-id: ${{ steps.acquire-build-lock.outputs.holder-id }}
+          resource-cleanup-status: ${{ steps.return-license.outputs.cleanup-status || steps.build.outputs.resourceCleanupStatus || 'unknown' }}
+          resource-health: ${{ (steps.acquire-build-lock.outputs.resource-health == 'blocked' || steps.build.outputs.resourceHealth == 'blocked' || steps.return-license.outputs.resource-health == 'blocked') && 'blocked' || 'healthy' }}
+          resource-reason: ${{ (steps.acquire-build-lock.outputs.resource-health == 'blocked' || steps.build.outputs.resourceHealth == 'blocked' || steps.return-license.outputs.resource-health == 'blocked') && 'unity-account-limit-20111' || steps.return-license.outputs.resource-reason || steps.build.outputs.resourceReason || steps.acquire-build-lock.outputs.resource-reason || 'cleanup-evidence-unknown' }}
+        env:
+          BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
+          BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}
+
+      - name: Require a successful build and exact cleanup evidence
+        id: verify-cleanup
+        if: ${{ always() }}
+        timeout-minutes: 2
+        env:
+          ACQUIRED: ${{ steps.acquire-build-lock.outputs.acquired }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          CLEANUP_STATUS: ${{ steps.return-license.outputs.cleanup-status || steps.build.outputs.resourceCleanupStatus }}
+          EVIDENCE_DIGEST: ${{ steps.return-license.outputs.evidence-digest || steps.build.outputs.resourceEvidenceDigest }}
+          ACQUIRE_HOLDER_ID: ${{ steps.acquire-build-lock.outputs.holder-id }}
+          RELEASE_AVAILABLE_AT: ${{ steps.release-build-lock.outputs.available-at }}
+          RELEASE_CLEANUP_RESULT: ${{ steps.release-build-lock.outputs.cleanup-result }}
+          RELEASE_HOLDER_ID: ${{ steps.release-build-lock.outputs.holder-id }}
+          RELEASE_OUTCOME: ${{ steps.release-build-lock.outcome }}
+          RELEASED: ${{ steps.release-build-lock.outputs.released }}
+          RELEASE_RESERVATION_STATE: ${{ steps.release-build-lock.outputs.reservation-state }}
+          RESOURCE_HEALTH: ${{ (steps.acquire-build-lock.outputs.resource-health == 'blocked' || steps.build.outputs.resourceHealth == 'blocked' || steps.return-license.outputs.resource-health == 'blocked') && 'blocked' || 'healthy' }}
+          RESOURCE_REASON: ${{ (steps.acquire-build-lock.outputs.resource-health == 'blocked' || steps.build.outputs.resourceHealth == 'blocked' || steps.return-license.outputs.resource-health == 'blocked') && 'unity-account-limit-20111' || steps.return-license.outputs.resource-reason || steps.build.outputs.resourceReason || steps.acquire-build-lock.outputs.resource-reason }}
+        run: |
+          set -euo pipefail
+          if [[ "${RESOURCE_HEALTH}" == blocked || "${RESOURCE_REASON}" == unity-account-limit-20111 ]]; then
+            echo '::error::Unity reported the account-limit 20111 incident.'
+            exit 1
+          fi
+          if [[ "${ACQUIRED}" != true || "${BUILD_OUTCOME}" != success ]]; then
+            echo '::error::Bounded macOS build did not succeed after lock admission.'
+            exit 1
+          fi
+          if [[ "${CLEANUP_STATUS}" != confirmed || "${RESOURCE_HEALTH}" != healthy || "${RESOURCE_REASON}" != cleanup-confirmed ]]; then
+            echo '::error::macOS cleanup did not produce the exact confirmed/healthy/cleanup-confirmed tuple.'
+            exit 1
+          fi
+          if [[ "${RELEASE_OUTCOME}" != success ]]; then
+            echo "::error::Schema-5 lock release finished with ${RELEASE_OUTCOME}."
+            exit 1
+          fi
+          if [[ "${RELEASED}" != true || "${RELEASE_CLEANUP_RESULT}" != cooldown-started || "${RELEASE_RESERVATION_STATE}" != cooldown ]]; then
+            echo '::error::Release did not remove the holder into the required cooldown.'
+            exit 1
+          fi
+          if [[ -z "${ACQUIRE_HOLDER_ID}" || "${RELEASE_HOLDER_ID}" != "${ACQUIRE_HOLDER_ID}" || -z "${RELEASE_AVAILABLE_AT}" ]]; then
+            echo '::error::Release outputs do not prove exact holder removal and cooldown availability.'
+            exit 1
+          fi
+          if [[ ! "${EVIDENCE_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo '::error::macOS cleanup evidence digest is missing or malformed.'
+            exit 1
+          fi
+          echo "::notice::macOS cleanup evidence reason=${RESOURCE_REASON} evidence-digest=${EVIDENCE_DIGEST}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ success() }}
+        timeout-minutes: 5
+        with:
+          name: Build StandaloneOSX on macOS (2022.3.62f3)
+          path: build
+          retention-days: 14
+
   buildForAllPlatformsMacOS:
     name: ${{ matrix.targetPlatform }} on ${{ matrix.unityVersion }}
-    # The fork cannot run this paid-license matrix until macOS cleanup emits
-    # lifecycle proof equivalent to the Windows owning-container proof.
-    if: ${{ github.repository == 'game-ci/unity-builder' }}
+    if: ${{ github.repository == 'game-ci/unity-builder' && inputs.mode == 'upstream-full' }}
+    needs: [resource-cleanup-proof-contract]
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -21,27 +244,18 @@ jobs:
           - 2022.3.62f3
           - 2023.2.22f1
         targetPlatform:
-          - StandaloneOSX # Build a MacOS executable
-          - iOS # Build an iOS executable
+          - StandaloneOSX
+          - iOS
         include:
-          # Additionally test enableGpu build for a standalone windows target
           - unityVersion: 6000.0.36f1
             targetPlatform: StandaloneOSX
           - unityVersion: 6000.0.36f1
             targetPlatform: StandaloneOSX
             buildProfile: 'Assets/Settings/Build Profiles/Sample macOS Build Profile.asset'
-
     steps:
-      ###########################
-      #         Checkout        #
-      ###########################
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           lfs: true
-
-      ###########################
-      #          Cache          #
-      ###########################
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ matrix.projectPath }}/Library
@@ -49,38 +263,65 @@ jobs:
           restore-keys: |
             Library-${{ matrix.projectPath }}-macos-
             Library-
-
-      ###########################
-      #  Set Scripting Backend  #
-      ###########################
-      - name: Set Scripting Backend To il2cpp
-        run: |
-          mv -f "./test-project/ProjectSettings/ProjectSettingsIl2cpp.asset" "./test-project/ProjectSettings/ProjectSettings.asset"
-
-      ###########################
-      #          Build          #
-      ###########################
+      - name: Set scripting backend to IL2CPP
+        run: >-
+          mv -f ./test-project/ProjectSettings/ProjectSettingsIl2cpp.asset
+          ./test-project/ProjectSettings/ProjectSettings.asset
       - uses: ./
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
           UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
         with:
+          allowDirtyBuild: true
           buildName: 'GameCI Test Build'
-          projectPath: ${{ matrix.projectPath }}
-          unityVersion: ${{ matrix.unityVersion }}
-          targetPlatform: ${{ matrix.targetPlatform }}
           buildProfile: ${{ matrix.buildProfile }}
           customParameters: -profile SomeProfile -someBoolean -someValue exampleValue
-          # We use dirty build because we are replacing the default project settings file above
-          allowDirtyBuild: true
-
-      ###########################
-      #          Upload         #
-      ###########################
+          projectPath: ${{ matrix.projectPath }}
+          targetPlatform: ${{ matrix.targetPlatform }}
+          unityVersion: ${{ matrix.unityVersion }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: Build ${{ matrix.targetPlatform }} on MacOS (${{ matrix.unityVersion }})${{ matrix.buildProfile && '  With Build Profile' || '' }}
+          name: Build ${{ matrix.targetPlatform }} on macOS (${{ matrix.unityVersion }})${{ matrix.buildProfile && ' With Build Profile' || '' }}
           path: build
           retention-days: 14
+
+  macos-license-ci:
+    name: macOS cleanup contract and licensed coverage
+    if: ${{ always() }}
+    needs:
+      - resource-cleanup-proof-contract
+      - boundedOrganizationMacOSCanary
+      - buildForAllPlatformsMacOS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the exact requested coverage
+        env:
+          CANARY_RESULT: ${{ needs.boundedOrganizationMacOSCanary.result }}
+          CONTRACT_RESULT: ${{ needs.resource-cleanup-proof-contract.result }}
+          MODE: ${{ inputs.mode }}
+          REPOSITORY: ${{ github.repository }}
+          UPSTREAM_RESULT: ${{ needs.buildForAllPlatformsMacOS.result }}
+        run: |
+          set -euo pipefail
+          if [[ "${CONTRACT_RESULT}" != success ]]; then
+            echo "::error::macOS cleanup fixtures finished with ${CONTRACT_RESULT}."
+            exit 1
+          fi
+          case "${REPOSITORY}:${MODE}" in
+            Ambiguous-Interactive/unity-builder:contract-only|game-ci/unity-builder:contract-only)
+              [[ "${CANARY_RESULT}" == skipped && "${UPSTREAM_RESULT}" == skipped ]]
+              echo 'No licensed macOS coverage was requested; cleanup contract fixtures passed.'
+              ;;
+            Ambiguous-Interactive/unity-builder:smoke)
+              [[ "${CANARY_RESULT}" == success && "${UPSTREAM_RESULT}" == skipped ]]
+              ;;
+            game-ci/unity-builder:upstream-full)
+              [[ "${CANARY_RESULT}" == skipped && "${UPSTREAM_RESULT}" == success ]]
+              ;;
+            *)
+              echo "::error::Repository ${REPOSITORY} is not enrolled for licensed macOS coverage."
+              exit 1
+              ;;
+          esac

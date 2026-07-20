@@ -32,6 +32,24 @@ describe('setResourceSafe', () => {
   });
 });
 
+describe('setResourceEvidence', () => {
+  it('publishes the complete typed cleanup tuple and sanitized digest', async () => {
+    await Output.setResourceEvidence({
+      resourceSafe: true,
+      cleanupStatus: 'confirmed',
+      health: 'healthy',
+      reason: 'cleanup-confirmed',
+      digest: 'a'.repeat(64),
+    });
+
+    expect(core.setOutput).toHaveBeenCalledWith('resourceSafe', 'true');
+    expect(core.setOutput).toHaveBeenCalledWith('resourceCleanupStatus', 'confirmed');
+    expect(core.setOutput).toHaveBeenCalledWith('resourceHealth', 'healthy');
+    expect(core.setOutput).toHaveBeenCalledWith('resourceReason', 'cleanup-confirmed');
+    expect(core.setOutput).toHaveBeenCalledWith('resourceEvidenceDigest', 'a'.repeat(64));
+  });
+});
+
 describe('Output', () => {
   describe('setAndroidVersionCode', () => {
     it('does not throw', async () => {

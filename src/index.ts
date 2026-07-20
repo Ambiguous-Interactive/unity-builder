@@ -73,7 +73,7 @@ async function runLocalBuild(
 
   await PlatformSetup.setup(buildParameters, actionFolder);
   const proofAttempt =
-    process.platform === 'win32'
+    process.platform === 'win32' || process.platform === 'darwin'
       ? ResourceCleanupProof.begin(process.env.RUNNER_TEMP ?? '')
       : undefined;
   let buildCompleted = false;
@@ -90,8 +90,11 @@ async function runLocalBuild(
     buildCompleted = true;
   } finally {
     if (proofAttempt) {
-      const proofSafe = ResourceCleanupProof.consume(proofAttempt);
-      await Output.setResourceSafe(buildCompleted && proofSafe);
+      const evidence = ResourceCleanupProof.consume(proofAttempt);
+      await Output.setResourceEvidence({
+        ...evidence,
+        resourceSafe: buildCompleted && evidence.resourceSafe,
+      });
     }
   }
 
