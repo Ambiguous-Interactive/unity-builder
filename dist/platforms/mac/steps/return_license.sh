@@ -6,23 +6,38 @@ echo "Changing to \"$ACTIVATE_LICENSE_PATH\" directory."
 pushd "$ACTIVATE_LICENSE_PATH" >/dev/null
 
 UNITY_EDITOR="${UNITY_BUILDER_UNITY_EDITOR_PATH:-/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app/Contents/MacOS/Unity}"
+RETURN_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RETURN_LAUNCHER="${UNITY_BUILDER_RETURN_LAUNCHER_PATH:-${RETURN_SCRIPT_DIR}/launch_isolated.py}"
 RETURN_LOG="${UNITY_BUILDER_RESOURCE_RETURN_LOG_PATH:-${TMPDIR:-/tmp}/unity-builder-return.log}"
 RETURN_STATUS="${UNITY_BUILDER_RESOURCE_STATUS_PATH:-${TMPDIR:-/tmp}/unity-builder-return.status}"
+RETURN_ISOLATION_READY="${RETURN_STATUS}.isolated"
+RETURN_ISOLATION_ACK="${RETURN_STATUS}.isolated-ack"
 RETURN_TIMEOUT_SECONDS="${UNITY_BUILDER_RETURN_TIMEOUT_SECONDS:-120}"
 RETURN_KILL_GRACE_SECONDS="${UNITY_BUILDER_RETURN_KILL_GRACE_SECONDS:-10}"
 PROOF_PATH="${UNITY_BUILDER_RESOURCE_PROOF_PATH:-}"
 PROOF_NONCE="${UNITY_BUILDER_RESOURCE_PROOF_NONCE:-}"
 return_pid=''
 return_pgid=''
-return_descendants=()
+return_shell_pgid=''
+# Bash 3.2 treats an empty-array expansion as unset under `set -u`. Keep one
+# ignored sentinel so teardown helpers remain nounset-safe before descendants
+# are discovered.
+return_descendants=('')
+return_status_write_failed=false
+return_isolated=false
 
-rm -f -- "$RETURN_LOG" "$RETURN_STATUS"
+rm -f -- "$RETURN_LOG" "$RETURN_STATUS" "$RETURN_ISOLATION_READY" "$RETURN_ISOLATION_ACK"
 if [[ -n "$PROOF_PATH" ]]; then
   rm -f -- "$PROOF_PATH"
 fi
 
 write_return_status() {
   printf '%s' "$1" >"$RETURN_STATUS"
+}
+
+read_process_group() {
+  local pid="$1"
+  ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]'
 }
 
 if [[ ! "$RETURN_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
@@ -60,6 +75,7 @@ return_tree_alive() {
     return 0
   fi
   for pid in "${return_descendants[@]}"; do
+    [[ -n "$pid" ]] || continue
     if return_process_alive "$pid"; then
       return 0
     fi
@@ -74,6 +90,7 @@ signal_return_tree() {
     return
   fi
   for pid in "${return_descendants[@]}"; do
+    [[ -n "$pid" ]] || continue
     kill -"$signal" "$pid" 2>/dev/null || true
   done
   [[ -z "$return_pid" ]] || kill -"$signal" "$return_pid" 2>/dev/null || true
@@ -83,7 +100,7 @@ stop_return_bounded() {
   local deadline
   [[ -n "$return_pid" ]] || return 0
   if [[ -z "$return_pgid" ]]; then
-    return_descendants=()
+    return_descendants=('')
     snapshot_return_descendants "$return_pid"
   fi
   signal_return_tree TERM
@@ -109,9 +126,34 @@ stop_return_bounded() {
   fi
 }
 
+kill_unisolated_return_bounded() {
+  local deadline
+  [[ -n "$return_pid" ]] || return 0
+  return_descendants=('')
+  snapshot_return_descendants "$return_pid"
+  # Without a dedicated process group, TERM could let the editor fork a new
+  # descendant and exit before that child can be discovered. KILL the known
+  # tree directly so no TERM handler can create an escaping process.
+  signal_return_tree KILL
+  deadline=$((SECONDS + 2))
+  while return_tree_alive && ((SECONDS < deadline)); do
+    sleep 0.1
+  done
+  if ! return_tree_alive; then
+    wait "$return_pid" 2>/dev/null || true
+  fi
+}
+
 terminate_return() {
-  write_return_status terminated
-  stop_return_bounded
+  trap '' INT TERM
+  if ! write_return_status terminated; then
+    echo '::error::Unable to persist terminated Unity return status.'
+  fi
+  if [[ "$return_isolated" == true ]]; then
+    stop_return_bounded
+  else
+    kill_unisolated_return_bounded
+  fi
   return_pid=''
   exit 143
 }
@@ -131,10 +173,10 @@ elif [[ -n "${UNITY_SERIAL:-}" ]]; then
   #
   # This will return the license that is currently in use.
   #
-  # Monitor mode gives the return process and every future descendant a
-  # dedicated process group, so TERM/KILL remains complete after late forks.
-  set -m
-  "$UNITY_EDITOR" \
+  # Python's setsid() supplies a dedicated process group on macOS, where Bash
+  # 3.2 monitor mode is not reliable in non-interactive shells. The launcher
+  # writes a private readiness record only after isolation succeeds.
+  python3 "$RETURN_LAUNCHER" "$RETURN_ISOLATION_READY" "$RETURN_ISOLATION_ACK" "$UNITY_EDITOR" \
     -logFile "$RETURN_LOG" \
     -batchmode \
     -nographics \
@@ -145,16 +187,44 @@ elif [[ -n "${UNITY_SERIAL:-}" ]]; then
     -projectPath "$ACTIVATE_LICENSE_PATH" \
     >/dev/null 2>&1 &
   return_pid=$!
-  return_pgid=$return_pid
-  set +m
+  isolation_deadline=$((SECONDS + 2))
+  while [[ ! -e "$RETURN_ISOLATION_READY" ]] && kill -0 "$return_pid" 2>/dev/null && ((SECONDS < isolation_deadline)); do
+    sleep 0.05
+  done
+  isolation_record="$(cat "$RETURN_ISOLATION_READY" 2>/dev/null || true)"
+  isolated_pid="${isolation_record%%:*}"
+  isolated_pgid="${isolation_record#*:}"
+  observed_pgid="$(read_process_group "$return_pid" || true)"
+  return_shell_pid="$(sh -c 'printf %s "$PPID"')"
+  return_shell_pgid="$(read_process_group "$return_shell_pid" || true)"
+  if [[ "$isolated_pid" == "$return_pid" && "$isolated_pgid" == "$return_pid" && "$observed_pgid" == "$return_pid" && "$isolated_pgid" != "$return_shell_pgid" ]]; then
+    return_pgid="$isolated_pgid"
+    return_isolated=true
+    : >"$RETURN_ISOLATION_ACK"
+  fi
+
+  if [[ -z "$return_pgid" ]]; then
+    if ! write_return_status isolation-failed; then
+      return_status_write_failed=true
+    fi
+    kill_unisolated_return_bounded
+    return_pid=''
+    echo '::warning::Unity license return lacked a dedicated process group; cleanup is unconfirmed.'
+  fi
 
   deadline=$((SECONDS + RETURN_TIMEOUT_SECONDS))
-  while kill -0 "$return_pid" 2>/dev/null; do
+  while [[ -n "$return_pid" ]] && kill -0 "$return_pid" 2>/dev/null; do
     if ((SECONDS >= deadline)); then
+      # Persist the fail-closed result before sending TERM/KILL. Even a shell or
+      # runner interruption during bounded teardown must not look like a clean
+      # or missing-status completion.
+      if ! write_return_status timeout; then
+        return_status_write_failed=true
+      fi
       stop_return_bounded
       return_pid=''
       return_pgid=''
-      write_return_status timeout
+      return_isolated=false
       echo "::warning::Unity license return exceeded ${RETURN_TIMEOUT_SECONDS} seconds; cleanup is unconfirmed."
       break
     fi
@@ -166,6 +236,7 @@ elif [[ -n "${UNITY_SERIAL:-}" ]]; then
     wait "$return_pid" || return_exit_code=$?
     return_pid=''
     return_pgid=''
+    return_isolated=false
     write_return_status "completed:${return_exit_code}"
 
     entitlement_returned=false
@@ -192,4 +263,9 @@ fi
 
 # Return to previous working directory
 trap - INT TERM
+rm -f -- "$RETURN_ISOLATION_READY" "$RETURN_ISOLATION_ACK"
 popd >/dev/null
+if [[ "$return_status_write_failed" == true ]]; then
+  echo '::error::Unable to persist the Unity return status after bounded teardown.'
+  return 1 2>/dev/null || exit 1
+fi

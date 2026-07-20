@@ -34,7 +34,7 @@ jobs:
     if: github.repository == 'Ambiguous-Interactive/unity-builder' && inputs.mode == 'smoke'
     needs: [resource-cleanup-proof-contract]
     runs-on: macos-14
-    # Explicit step budgets total 143 minutes; keep a 22-minute job-level
+    # Explicit step budgets total 144 minutes; keep a 21-minute job-level
     # reserve so verification and post cleanup survive a near-budget build.
     timeout-minutes: 165
     steps:
@@ -59,6 +59,11 @@ jobs:
           mv -f ./test-project/ProjectSettings/ProjectSettingsIl2cpp.asset
           ./test-project/ProjectSettings/ProjectSettings.asset
 
+      - name: Require isolated return-process support
+        id: return-isolation
+        timeout-minutes: 1
+        run: python3 -c 'import os; assert hasattr(os, "setsid")'
+
       - name: Acquire organization Unity lock
         id: acquire-build-lock
         timeout-minutes: 45
@@ -70,7 +75,7 @@ jobs:
           holder-id-suffix: ${{ github.job }}
           timeout-minutes: '40'
           require-resource-lifecycle: 'true'
-          minimum-release-cooldown-seconds: '1'
+          minimum-release-cooldown-seconds: '360'
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
           BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}

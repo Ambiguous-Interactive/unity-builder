@@ -169,14 +169,22 @@ if (
     'RC020: native macOS proof must require a present exact log and completed zero exit status',
   );
 const macReturnRuntime = read('dist/platforms/mac/steps/return_license.sh');
+const macIsolationLauncher = read('dist/platforms/mac/steps/launch_isolated.py');
 if (
   !macReturnRuntime.includes('snapshot_return_descendants') ||
   !macReturnRuntime.includes('return_tree_alive') ||
-  !macReturnRuntime.includes('return_pgid=$return_pid') ||
+  !macReturnRuntime.includes('RETURN_ISOLATION_READY') ||
+  !macReturnRuntime.includes('RETURN_ISOLATION_ACK') ||
+  !macReturnRuntime.includes('"$observed_pgid" == "$return_pid"') ||
+  !macReturnRuntime.includes('kill_unisolated_return_bounded') ||
   !macReturnRuntime.includes('kill -"$signal" -- "-$return_pgid"') ||
   !macReturnRuntime.includes('signal_return_tree TERM') ||
   !macReturnRuntime.includes('signal_return_tree KILL') ||
-  !macReturnRuntime.includes('if ! return_tree_alive; then')
+  !macReturnRuntime.includes('if ! return_tree_alive; then') ||
+  !macIsolationLauncher.includes('os.setsid()') ||
+  !macIsolationLauncher.includes('os.getpgrp()') ||
+  !macIsolationLauncher.includes('os.replace(') ||
+  !macIsolationLauncher.includes('os.execv(')
 )
   failures.push(
     'RC020: bounded macOS termination must track and kill descendants even after the Unity parent exits',
@@ -635,27 +643,32 @@ if (
     'RC020: organization macOS coverage must be one bounded hosted leg while upstream stays gated',
   );
 const macAcquire = macStep('acquire-build-lock');
+const macIsolation = macStep('return-isolation');
 const macBuild = macStep('build');
 const macReturn = macStep('return-license');
 const macRelease = macStep('release-build-lock');
 const macVerify = macStep('verify-cleanup');
 if (
   macStepIndex('acquire-build-lock') < 0 ||
+  macStepIndex('return-isolation') !== macStepIndex('acquire-build-lock') - 1 ||
   macStepIndex('build') !== macStepIndex('acquire-build-lock') + 1 ||
   macStepIndex('return-license') !== macStepIndex('build') + 1 ||
   macStepIndex('release-build-lock') !== macStepIndex('return-license') + 1 ||
   macStepIndex('verify-cleanup') !== macStepIndex('release-build-lock') + 1
 )
   failures.push(
-    'RC020: macOS must order acquire, one local build, same-runner return, release, and verification',
+    'RC020: macOS must order isolation preflight, acquire, one local build, same-runner return, release, and verification',
   );
 if (
+  macIsolation?.run !== `python3 -c 'import os; assert hasattr(os, "setsid")'` ||
+  macIsolation?.['timeout-minutes'] !== 1 ||
+  macIsolation?.env ||
   macAcquire?.uses !==
     `Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock-with-cleanup@${buildLockSha}` ||
   macAcquire?.with?.['runner-id'] !== '${{ runner.name }}' ||
   macAcquire?.with?.['holder-id-suffix'] !== '${{ github.job }}' ||
   macAcquire?.with?.['require-resource-lifecycle'] !== 'true' ||
-  macAcquire?.with?.['minimum-release-cooldown-seconds'] !== '1' ||
+  macAcquire?.with?.['minimum-release-cooldown-seconds'] !== '360' ||
   macBuild?.uses !== './' ||
   macBuild?.if !== "${{ steps.acquire-build-lock.outputs.acquired == 'true' }}" ||
   macBuild?.['continue-on-error'] !== true ||

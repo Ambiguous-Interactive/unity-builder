@@ -88,9 +88,10 @@ EDITOR
 
 run_return_case() {
   local behavior="$1" expected_proof="$2" expected_status="$3"
+  local selected_launcher="${4:-}" fake_behavior="${5:-${behavior}}"
   local case_dir="${scratch}/${behavior}" editor output proof status
   mkdir -p "${case_dir}/project"
-  editor="$(make_editor "${behavior}")"
+  editor="$(make_editor "${fake_behavior}")"
   output="${case_dir}/console.log"
   proof="${case_dir}/proof"
   status="${case_dir}/status"
@@ -107,9 +108,16 @@ run_return_case() {
     export UNITY_BUILDER_RESOURCE_STATUS_PATH="${status}"
     export UNITY_BUILDER_RETURN_TIMEOUT_SECONDS=1
     export UNITY_BUILDER_RETURN_KILL_GRACE_SECONDS=1
-    export FAKE_BEHAVIOR="${behavior}"
+    export FAKE_BEHAVIOR="${fake_behavior}"
     export FAKE_TERMINATED_SENTINEL="${case_dir}/terminated"
     export FAKE_DESCENDANT_PID_FILE="${case_dir}/descendant-pid"
+    export FAKE_UNISOLATED_LAUNCHER_PID_FILE="${case_dir}/launcher-pid"
+    export FAKE_UNISOLATED_TERM_SENTINEL="${case_dir}/launcher-term"
+    if [[ -n "${selected_launcher}" ]]; then
+      export UNITY_BUILDER_RETURN_LAUNCHER_PATH="${selected_launcher}"
+    else
+      unset UNITY_BUILDER_RETURN_LAUNCHER_PATH || true
+    fi
     source "${return_script}"
   ) >"${output}" 2>&1 || true
 
@@ -121,6 +129,7 @@ run_return_case() {
   else
     [[ ! -e "${proof}" ]] || fail "${behavior} unexpectedly wrote cleanup proof"
   fi
+  [[ -e "${status}" ]] || fail "${behavior} did not persist a return status"
   [[ "$(cat "${status}")" == "${expected_status}" ]] ||
     fail "${behavior} status was not ${expected_status}"
   ! grep -Eq '20111|synthetic-serial|synthetic-password' "${output}" ||
@@ -147,6 +156,108 @@ if kill -0 "${late_fork_pid}" 2>/dev/null; then
   kill -KILL "${late_fork_pid}" 2>/dev/null || true
   fail 'return timeout left a descendant that was forked during TERM handling running'
 fi
+
+shared_group_launcher="${scratch}/launch-shared.py"
+cat >"${shared_group_launcher}" <<'PYTHON'
+#!/usr/bin/env python3
+import os
+import signal
+import sys
+import time
+
+ready_path = sys.argv[1]
+acknowledge_path = sys.argv[2]
+pid_path = os.environ["FAKE_UNISOLATED_LAUNCHER_PID_FILE"]
+term_path = os.environ["FAKE_UNISOLATED_TERM_SENTINEL"]
+with open(pid_path, "x", encoding="ascii") as pid_file:
+    pid_file.write(str(os.getpid()))
+
+def on_term(_signal, _frame):
+    with open(term_path, "x", encoding="ascii") as term_file:
+        term_file.write("term")
+
+signal.signal(signal.SIGTERM, on_term)
+with open(ready_path, "x", encoding="ascii") as ready_file:
+    ready_file.write(f"{os.getpid()}:{os.getpgrp()}")
+deadline = time.monotonic() + 5
+while not os.path.exists(acknowledge_path):
+    if time.monotonic() >= deadline:
+        raise SystemExit(70)
+    time.sleep(0.01)
+os.execv(sys.argv[3], sys.argv[3:])
+PYTHON
+run_return_case shared-timeout false isolation-failed "${shared_group_launcher}" timeout
+run_return_case shared-late-fork false isolation-failed "${shared_group_launcher}" late-fork
+for shared_case in shared-timeout shared-late-fork; do
+  shared_launcher_pid="$(cat "${scratch}/${shared_case}/launcher-pid")"
+  if kill -0 "${shared_launcher_pid}" 2>/dev/null; then
+    kill -KILL "${shared_launcher_pid}" 2>/dev/null || true
+    fail "${shared_case} left its unisolated launcher running"
+  fi
+  [[ ! -e "${scratch}/${shared_case}/launcher-term" ]] ||
+    fail "${shared_case} used TERM before process-group isolation"
+  [[ ! -e "${scratch}/${shared_case}/descendant-pid" ]] ||
+    fail "${shared_case} executed Unity before process-group isolation was accepted"
+done
+run_return_case missing-launcher false isolation-failed "${scratch}/missing-launcher.py" timeout
+
+handshake_cancel_dir="${scratch}/handshake-cancel"
+mkdir -p "${handshake_cancel_dir}/project"
+handshake_cancel_editor="$(make_editor cancel)"
+handshake_cancel_launcher="${handshake_cancel_dir}/launch-delayed.py"
+cat >"${handshake_cancel_launcher}" <<'PYTHON'
+#!/usr/bin/env python3
+import os
+import signal
+import time
+
+pid_path = os.environ["FAKE_UNISOLATED_LAUNCHER_PID_FILE"]
+term_path = os.environ["FAKE_UNISOLATED_TERM_SENTINEL"]
+with open(pid_path, "x", encoding="ascii") as pid_file:
+    pid_file.write(str(os.getpid()))
+
+def on_term(_signal, _frame):
+    with open(term_path, "x", encoding="ascii") as term_file:
+        term_file.write("term")
+
+signal.signal(signal.SIGTERM, on_term)
+time.sleep(20)
+PYTHON
+(
+  export ACTIVATE_LICENSE_PATH="${handshake_cancel_dir}/project"
+  export UNITY_SERIAL='synthetic-serial'
+  export UNITY_EMAIL='synthetic@example.invalid'
+  export UNITY_PASSWORD='synthetic-password'
+  export UNITY_LICENSING_SERVER=''
+  export UNITY_BUILDER_UNITY_EDITOR_PATH="${handshake_cancel_editor}"
+  export UNITY_BUILDER_RESOURCE_PROOF_NONCE='current-nonce'
+  export UNITY_BUILDER_RESOURCE_PROOF_PATH="${handshake_cancel_dir}/proof"
+  export UNITY_BUILDER_RESOURCE_RETURN_LOG_PATH="${handshake_cancel_dir}/return.log"
+  export UNITY_BUILDER_RESOURCE_STATUS_PATH="${handshake_cancel_dir}/status"
+  export UNITY_BUILDER_RETURN_TIMEOUT_SECONDS=20
+  export UNITY_BUILDER_RETURN_KILL_GRACE_SECONDS=1
+  export UNITY_BUILDER_RETURN_LAUNCHER_PATH="${handshake_cancel_launcher}"
+  export FAKE_UNISOLATED_LAUNCHER_PID_FILE="${handshake_cancel_dir}/launcher-pid"
+  export FAKE_UNISOLATED_TERM_SENTINEL="${handshake_cancel_dir}/launcher-term"
+  source "${return_script}"
+) >"${handshake_cancel_dir}/console.log" 2>&1 &
+handshake_cancel_pid=$!
+for _ in {1..50}; do
+  [[ -e "${handshake_cancel_dir}/launcher-pid" ]] && break
+  sleep 0.1
+done
+[[ -e "${handshake_cancel_dir}/launcher-pid" ]] || fail 'handshake cancellation launcher did not start'
+handshake_launcher_pid="$(cat "${handshake_cancel_dir}/launcher-pid")"
+kill -TERM "${handshake_cancel_pid}"
+wait "${handshake_cancel_pid}" || true
+[[ "$(cat "${handshake_cancel_dir}/status")" == terminated ]] ||
+  fail 'handshake cancellation was not classified terminated'
+if kill -0 "${handshake_launcher_pid}" 2>/dev/null; then
+  kill -KILL "${handshake_launcher_pid}" 2>/dev/null || true
+  fail 'handshake cancellation left the unisolated launcher running'
+fi
+[[ ! -e "${handshake_cancel_dir}/launcher-term" ]] ||
+  fail 'handshake cancellation sent TERM before isolation was established'
 
 cancel_dir="${scratch}/cancel"
 mkdir -p "${cancel_dir}/project"
